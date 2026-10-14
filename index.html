@@ -12,17 +12,20 @@
 <style>
 html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
 #map { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
-#bar { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 1000; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+#bar { position: absolute; top: 10px; left: 10px; right: 64px; z-index: 1000; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 #bar .logo { width: 36px; height: 36px; background: #fff; border-radius: 50%; padding: 4px; box-sizing: border-box; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
 button, .btn { background: #2d5a27; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; font-size: 15px; cursor: pointer; }
 button.sec { background: #888; }
 #bar .btn { background: #fff; color: #2d5a27; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-#vide { position: absolute; top: 64px; left: 10px; right: 10px; z-index: 1000; background: #fff; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); display: none; }
+#vide { position: absolute; top: 64px; left: 10px; right: 64px; z-index: 1000; background: #fff; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); display: none; }
 #panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 65%; overflow: auto; background: #fff; border-radius: 16px 16px 0 0; padding: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,.2); display: none; z-index: 2000; }
 #panel label { display: block; margin: 10px 0; font-size: 14px; }
 #panel input, #panel select, #panel textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }
 #panel button { margin: 10px 6px 0 0; }
 .muted { color: #666; font-size: 13px; }
+.legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
+.legende .grad { width: 130px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, hsl(0,80%,42%), hsl(60,80%,42%), hsl(120,80%,32%)); }
+.legende .ext { display: flex; justify-content: space-between; }
 </style>
 </head>
 <body>
@@ -37,26 +40,53 @@ button.sec { background: #888; }
   <button onclick="exporter()">Exporter</button>
   <label class="btn">Importer<input type="file" accept="application/json" onchange="importer(event)" style="display:none"></label>
 </div>
-<div id="vide">Aucune sortie enregistrée. Appuie sur « Ma position », puis sur « Noter une sortie ici ».</div>
+<div id="vide">Aucune sortie enregistrée. Les zones colorées apparaissent autour des sorties : appuie sur « Ma position », puis sur « Noter une sortie ici ».</div>
 <div id="map"></div>
 <div id="panel"></div>
 
 <script>
 const KEY = 'cueillette_sorties';
 const DEMI_VIE = 21;   // jours : une sortie perd la moitié de son poids après ce délai
-const RAYON = 300;     // mètres autour du point évalué
+const RAYON = 300;     // mètres : portée d'une sortie autour de son point
 const PRIOR = 0.3;     // probabilité de base avant toute donnée locale
 const PRIOR_POIDS = 1; // poids de cette base par rapport aux sorties réelles
+const CELLULE = 50;    // mètres : taille des cases colorées
 
 let sorties = JSON.parse(localStorage.getItem(KEY) || '[]');
 let tempMarker = null;
 
-const map = L.map('map').setView([46.6, 2.5], 6);
+const map = L.map('map', { zoomControl: false }).setView([46.6, 2.5], 6);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '© OpenStreetMap'
 }).addTo(map);
+
+const forets = L.tileLayer.wms('https://data.geopf.fr/wms-r/wms', {
+  layers: 'LANDCOVER.FORESTINVENTORY.V2',
+  format: 'image/png',
+  transparent: true,
+  version: '1.3.0',
+  opacity: 0.5,
+  attribution: '© IGN BD Forêt'
+});
+
+const rendu = L.canvas({ padding: 0.5 });
+const zones = L.layerGroup().addTo(map);
 const couche = L.layerGroup().addTo(map);
+
+L.control.layers(null, {
+  'Zones de probabilité': zones,
+  'Forêts (IGN)': forets
+}, { position: 'topright', collapsed: true }).addTo(map);
+
+const legende = L.control({ position: 'bottomleft' });
+legende.onAdd = () => {
+  const d = L.DomUtil.create('div', 'legende');
+  d.innerHTML = '<b>Probabilité</b><div class="grad"></div><div class="ext"><span>Faible</span><span>Forte</span></div>';
+  return d;
+};
+legende.addTo(map);
+
 const panel = document.getElementById('panel');
 const vide = document.getElementById('vide');
 
@@ -73,16 +103,51 @@ function distance(lat1, lng1, lat2, lng2) {
 
 function score(lat, lng) {
   const now = Date.now();
-  let num = PRIOR * PRIOR_POIDS, den = PRIOR_POIDS, n = 0;
+  let num = PRIOR * PRIOR_POIDS, den = PRIOR_POIDS, n = 0, poids = 0;
   for (const s of sorties) {
-    if (distance(lat, lng, s.lat, s.lng) > RAYON) continue;
-    const age = (now - new Date(s.date).getTime()) / 86400000;
-    const w = Math.pow(0.5, age / DEMI_VIE);
+    const d = distance(lat, lng, s.lat, s.lng);
+    if (d > RAYON) continue;
+    const age = Math.max(0, (now - new Date(s.date).getTime()) / 86400000);
+    const w = Math.pow(0.5, age / DEMI_VIE) * (1 - d / RAYON);
     num += w * (s.found ? 1 : 0);
     den += w;
+    poids += w;
     n++;
   }
-  return { p: num / den, n };
+  return { p: num / den, n, poids };
+}
+
+function couleur(p) {
+  const teinte = Math.round(Math.max(0, Math.min(1, p)) * 120);
+  return `hsl(${teinte}, 80%, ${teinte > 90 ? 32 : 42}%)`;
+}
+
+function dessinerZones() {
+  zones.clearLayers();
+  if (!sorties.length) return;
+  const dLat = CELLULE / 111320;
+  const dLng = CELLULE / (111320 * Math.cos(46.5 * Math.PI / 180));
+  const pas = Math.ceil(RAYON / CELLULE);
+  const vues = new Set();
+  for (const s of sorties) {
+    const i0 = Math.floor(s.lat / dLat), j0 = Math.floor(s.lng / dLng);
+    for (let i = i0 - pas; i <= i0 + pas; i++) {
+      for (let j = j0 - pas; j <= j0 + pas; j++) {
+        const k = i + ':' + j;
+        if (vues.has(k)) continue;
+        vues.add(k);
+        const { p, poids } = score((i + 0.5) * dLat, (j + 0.5) * dLng);
+        if (poids < 0.05) continue;
+        L.rectangle([[i * dLat, j * dLng], [(i + 1) * dLat, (j + 1) * dLng]], {
+          renderer: rendu,
+          stroke: false,
+          fillColor: couleur(p),
+          fillOpacity: Math.min(0.55, 0.1 + 0.45 * poids),
+          interactive: false
+        }).addTo(zones);
+      }
+    }
+  }
 }
 
 async function pluie10j(lat, lng) {
@@ -105,12 +170,14 @@ function render() {
   couche.clearLayers();
   sorties.forEach(s => {
     L.circleMarker([s.lat, s.lng], {
-      radius: 8,
-      color: s.found ? '#1b7f3b' : '#999',
-      fillColor: s.found ? '#1b7f3b' : '#999',
-      fillOpacity: 0.8
+      radius: 7,
+      color: '#fff',
+      weight: 2,
+      fillColor: s.found ? '#1b7f3b' : '#777',
+      fillOpacity: 0.9
     }).bindPopup(popupHtml(s)).addTo(couche);
   });
+  dessinerZones();
   vide.style.display = sorties.length ? 'none' : 'block';
 }
 
@@ -143,7 +210,7 @@ function showSpot(lat, lng) {
   tempMarker = L.marker([lat, lng]).addTo(map);
   const resultat = n === 0
     ? '<h3>Aucune sortie à proximité</h3><p class="muted">Pas de donnée locale pour ce point.</p>'
-    : `<h3>Probabilité estimée : ${Math.round(p * 100)} %</h3><p class="muted">${n} sortie(s) dans un rayon de 300 m</p>`;
+    : `<h3>Probabilité estimée : ${Math.round(p * 100)} %</h3><p class="muted">${n} sortie(s) dans un rayon de ${RAYON} m</p>`;
   openPanel(`
     ${resultat}
     <p class="muted">Estimation indicative, pas une garantie. Ne jamais utiliser cette carte pour identifier une espèce.</p>
