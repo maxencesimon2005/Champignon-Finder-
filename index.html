@@ -22,9 +22,10 @@ button.sec { background: #888; }
 #panel input, #panel select, #panel textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }
 #panel button { margin: 10px 6px 0 0; }
 .muted { color: #666; font-size: 13px; }
-.legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 220px; }
-.legende .grad { width: 140px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, rgb(255,240,120), rgb(255,150,0), rgb(200,0,0)); }
-.legende .ext { display: flex; justify-content: space-between; width: 140px; }
+.legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 230px; }
+.legende .grad { width: 150px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, rgb(255,235,100), rgb(255,140,0), rgb(200,0,0)); }
+.legende .ext { display: flex; justify-content: space-between; width: 150px; }
+.legende .version { color: #999; font-weight: normal; margin-left: 6px; }
 #info { margin-top: 4px; }
 .fond-gris { filter: grayscale(1) brightness(1.05) contrast(0.85); }
 </style>
@@ -46,34 +47,36 @@ button.sec { background: #888; }
 <div id="panel"></div>
 
 <script>
+const VERSION = 'v5';
 const KEY = 'cueillette_sorties';
 const RAYON = 300;        // m : portée d'une sortie autour de son point
 const DEMI_VIE = 365;     // jours : une sortie garde la moitié de son poids après 1 an
-const PRIOR_POIDS = 1;    // poids de l'habitat face aux sorties
-const H_FORET = 0.5;      // potentiel de base d'une forêt
-const H_HORS = 0.04;      // potentiel de base hors forêt
+const AJUST_MAX = 0.4;    // influence maximale des sorties : plus ou moins 40 %
+const HAB_HORS = 0.6;     // facteur appliqué hors forêt
+const HAB_INCONNU = 0.8;  // facteur tant que les forêts ne sont pas chargées
 const PLUIE_OPTI = 40;    // mm de pluie sur environ 12 jours pour un indice pluie maximal
 const ZOOM_MIN = 13;      // zoom minimal pour calculer la heatmap
 const COLONNES = 160;     // résolution horizontale de la heatmap
-const P_MIN = 0.05;       // en dessous : rien n'est affiché
-const P_MAX = 0.6;        // à partir de là : rouge foncé
 const OPACITE = 0.85;     // opacité générale de la heatmap
+const GM_COLS = 6;        // grille de points météo : colonnes
+const GM_ROWS = 8;        // grille de points météo : lignes
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
 ];
-const RAMPE = [[0, [255, 240, 120]], [0.5, [255, 150, 0]], [1, [200, 0, 0]]];
+const RAMPE = [[0, [255, 235, 100]], [0.5, [255, 140, 0]], [1, [200, 0, 0]]];
 
 let sorties = JSON.parse(localStorage.getItem(KEY) || '[]');
 let tempMarker = null;
 let polys = [];
 let foretsZone = null;
 let foretErreur = '';
-let chargement = null;
-let meteoActuelle = null;
+let chargementForets = null;
+let grilleMeteo = null;
+let meteoErreur = '';
+let chargementMeteo = null;
 let cacheMeteo = {};
-let jeton = 0;
 let minuterie = null;
 
 const map = L.map('map', { zoomControl: false }).setView([46.6, 2.5], 6);
@@ -113,7 +116,8 @@ L.control.layers({
 const legende = L.control({ position: 'bottomleft' });
 legende.onAdd = () => {
   const d = L.DomUtil.create('div', 'legende');
-  d.innerHTML = '<b>Probabilité</b><div class="grad"></div><div class="ext"><span>Faible</span><span>Élevée</span></div><div id="info" class="muted"></div>';
+  d.innerHTML = `<b>Probabilité</b><span class="version">${VERSION}</span><div class="grad"></div>` +
+                '<div class="ext"><span>Faible</span><span>Élevée</span></div><div id="info" class="muted"></div>';
   L.DomEvent.disableClickPropagation(d);
   return d;
 };
@@ -122,6 +126,7 @@ legende.addTo(map);
 const panel = document.getElementById('panel');
 
 const esc = t => String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 
 function save() { localStorage.setItem(KEY, JSON.stringify(sorties)); }
 
@@ -137,7 +142,17 @@ function distance(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-/* ---------- Météo ---------- */
+async function fetchTimeout(url, opts, ms) {
+  const ctrl = new AbortController();
+  const minut = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal }));
+  } finally {
+    clearTimeout(minut);
+  }
+}
+
+/* ---------- Météo (facteur principal) ---------- */
 
 function facteurTemp(t) {
   if (t <= 4 || t >= 26) return 0;
@@ -170,6 +185,7 @@ function indiceMeteo(d) {
   };
 }
 
+// Météo d'un seul point (utilisée pour enregistrer une sortie)
 async function meteo(lat, lng, date) {
   const fmt = d => d.toISOString().slice(0, 10);
   const la = lat.toFixed(2), lo = lng.toFixed(2);
@@ -182,7 +198,7 @@ async function meteo(lat, lng, date) {
                  '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min&timezone=auto';
   for (const base of ['https://api.open-meteo.com/v1/forecast', 'https://archive-api.open-meteo.com/v1/archive']) {
     try {
-      const j = await (await fetch(base + params)).json();
+      const j = await (await fetchTimeout(base + params, {}, 15000)).json();
       if (!j.daily || !j.daily.time) continue;
       const v = indiceMeteo(j.daily);
       cacheMeteo[cle] = { t: Date.now(), v };
@@ -192,38 +208,96 @@ async function meteo(lat, lng, date) {
   return null;
 }
 
-function facteurMeteo() {
-  const m = meteoActuelle ? meteoActuelle.indice : 0.5;
-  return 0.2 + 0.8 * m;
+// Météo sur une grille de points couvrant la zone affichée
+async function chargerMeteoGrille(zone) {
+  const S = zone.getSouth(), N = zone.getNorth(), W = zone.getWest(), E = zone.getEast();
+  const lats = [], lngs = [];
+  for (let r = 0; r < GM_ROWS; r++) {
+    for (let c = 0; c < GM_COLS; c++) {
+      lats.push((S + (N - S) * r / (GM_ROWS - 1)).toFixed(4));
+      lngs.push((W + (E - W) * c / (GM_COLS - 1)).toFixed(4));
+    }
+  }
+  const fmt = d => d.toISOString().slice(0, 10);
+  const fin = new Date();
+  const debut = new Date(fin.getTime() - 14 * 86400000);
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats.join(',')}&longitude=${lngs.join(',')}` +
+              `&start_date=${fmt(debut)}&end_date=${fmt(fin)}` +
+              '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min&timezone=auto';
+  const r = await fetchTimeout(url, {}, 20000);
+  const j = await r.json();
+  const liste = Array.isArray(j) ? j : [j];
+  const vals = liste.map(o => (o && o.daily && o.daily.time) ? indiceMeteo(o.daily) : null);
+  const ok = vals.filter(Boolean);
+  if (!ok.length) throw new Error(j && j.reason ? j.reason : 'météo indisponible');
+  const moy = ok.reduce((a, v) => a + v.indice, 0) / ok.length;
+  return { zone, S, N, W, E, rows: GM_ROWS, cols: GM_COLS, vals, moy, t: Date.now() };
 }
 
-/* ---------- Forêts (OpenStreetMap via Overpass) ---------- */
+function zoneMeteo(vue) {
+  const c = vue.getCenter();
+  return vue.pad(0.3).extend(L.latLngBounds([c.lat - 0.03, c.lng - 0.045], [c.lat + 0.03, c.lng + 0.045]));
+}
+
+function assurerMeteo(vue) {
+  if (grilleMeteo && grilleMeteo.zone.contains(vue) && Date.now() - grilleMeteo.t < 2 * 3600000) return Promise.resolve();
+  if (chargementMeteo && chargementMeteo.zone.contains(vue)) return chargementMeteo.promise;
+  const zone = zoneMeteo(vue);
+  const promise = chargerMeteoGrille(zone)
+    .then(g => { grilleMeteo = g; meteoErreur = ''; })
+    .catch(e => { meteoErreur = e.message || 'erreur'; })
+    .finally(() => { if (chargementMeteo && chargementMeteo.promise === promise) chargementMeteo = null; });
+  chargementMeteo = { zone, promise };
+  return promise;
+}
+
+// Indice météo interpolé à un point (bilinéaire entre les points de la grille)
+function meteoEn(lat, lng) {
+  const g = grilleMeteo;
+  if (!g) return null;
+  const fr = clamp((lat - g.S) / (g.N - g.S) * (g.rows - 1), 0, g.rows - 1);
+  const fc = clamp((lng - g.W) / (g.E - g.W) * (g.cols - 1), 0, g.cols - 1);
+  const r0 = Math.floor(fr), c0 = Math.floor(fc);
+  const r1 = Math.min(r0 + 1, g.rows - 1), c1 = Math.min(c0 + 1, g.cols - 1);
+  const a = fr - r0, b = fc - c0;
+  const v = (r, c) => { const x = g.vals[r * g.cols + c]; return x ? x.indice : g.moy; };
+  return v(r0, c0) * (1 - a) * (1 - b) + v(r0, c1) * (1 - a) * b + v(r1, c0) * a * (1 - b) + v(r1, c1) * a * b;
+}
+
+function resumeMeteo() {
+  const g = grilleMeteo;
+  if (!g) return null;
+  const ok = g.vals.filter(Boolean);
+  const moyenne = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  const tm = ok.map(v => v.tmoy).filter(x => x != null);
+  const ind = ok.map(v => v.indice);
+  return {
+    pluie: Math.round(moyenne(ok.map(v => v.pluie))),
+    tmoy: tm.length ? Math.round(moyenne(tm) * 10) / 10 : null,
+    min: Math.round(Math.min(...ind) * 100),
+    max: Math.round(Math.max(...ind) * 100)
+  };
+}
+
+/* ---------- Forêts (OpenStreetMap via Overpass, en arrière-plan) ---------- */
 
 async function overpass(q) {
   let derniere = 'serveur injoignable';
   for (const url of OVERPASS) {
-    const ctrl = new AbortController();
-    const minut = setTimeout(() => ctrl.abort(), 30000);
     try {
-      const r = await fetch(url, {
+      const r = await fetchTimeout(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'data=' + encodeURIComponent(q),
-        signal: ctrl.signal
-      });
+        body: 'data=' + encodeURIComponent(q)
+      }, 20000);
       if (r.ok) {
         const j = await r.json();
-        if (j.remark && /error|timed out/i.test(j.remark)) {
-          derniere = 'serveur saturé';
-          continue;
-        }
+        if (j.remark && /error|timed out/i.test(j.remark)) { derniere = 'serveur saturé'; continue; }
         return j;
       }
       derniere = r.status === 429 ? 'trop de requêtes' : 'serveur saturé';
     } catch (e) {
       derniere = 'serveur injoignable';
-    } finally {
-      clearTimeout(minut);
     }
   }
   throw new Error(derniere);
@@ -236,7 +310,7 @@ function zoneAutour(vue) {
 
 async function chargerForets(zone) {
   const bb = [zone.getSouth(), zone.getWest(), zone.getNorth(), zone.getEast()].map(x => x.toFixed(5)).join(',');
-  const q = `[out:json][timeout:25];(way["landuse"="forest"](${bb});way["natural"="wood"](${bb});` +
+  const q = `[out:json][timeout:20];(way["landuse"="forest"](${bb});way["natural"="wood"](${bb});` +
             `relation["landuse"="forest"](${bb});relation["natural"="wood"](${bb}););out geom;`;
   const data = await overpass(q);
   const liste = [];
@@ -259,7 +333,7 @@ async function chargerForets(zone) {
       if (p.lon > b[3]) b[3] = p.lon;
     }
     const lt = el.tags && el.tags.leaf_type;
-    const f = lt === 'needleleaved' ? 0.85 : (lt === 'broadleaved' || lt === 'mixed') ? 1 : 0.9;
+    const f = lt === 'needleleaved' ? 0.9 : 1;
     liste.push({ rings, b, f });
   }
   return liste;
@@ -267,13 +341,13 @@ async function chargerForets(zone) {
 
 function assurerForets(vue) {
   if (foretsZone && foretsZone.contains(vue)) return Promise.resolve();
-  if (chargement && chargement.zone.contains(vue)) return chargement.promise;
+  if (chargementForets && chargementForets.zone.contains(vue)) return chargementForets.promise;
   const zone = zoneAutour(vue);
   const promise = chargerForets(zone)
     .then(liste => { polys = liste; foretsZone = zone; foretErreur = ''; })
     .catch(e => { foretErreur = e.message || 'erreur'; })
-    .finally(() => { if (chargement && chargement.promise === promise) chargement = null; });
-  chargement = { zone, promise };
+    .finally(() => { if (chargementForets && chargementForets.promise === promise) chargementForets = null; });
+  chargementForets = { zone, promise };
   return promise;
 }
 
@@ -294,7 +368,7 @@ function foretEn(lat, lng) {
   return f;
 }
 
-/* ---------- Sorties ---------- */
+/* ---------- Sorties (ajustement secondaire) ---------- */
 
 function poidsSortie(s, now) {
   const age = Math.max(0, (now - new Date(s.date).getTime()) / 86400000);
@@ -309,9 +383,17 @@ function poidsSortie(s, now) {
   return Math.pow(0.5, age / DEMI_VIE) * fiab;
 }
 
+// Retourne un multiplicateur entre 1 - AJUST_MAX et 1 + AJUST_MAX
+function ajustement(sw, swy) {
+  if (sw <= 0) return 1;
+  return 1 + AJUST_MAX * (2 * swy - sw) / (sw + 1);
+}
+
 function probaPoint(lat, lng) {
-  const f = foretEn(lat, lng);
-  const h = f > 0 ? H_FORET * f : H_HORS;
+  const m = meteoEn(lat, lng);
+  const charge = !!(foretsZone && foretsZone.contains([lat, lng]));
+  const f = charge ? foretEn(lat, lng) : 0;
+  const hab = !charge ? HAB_INCONNU : (f > 0 ? f : HAB_HORS);
   const now = Date.now();
   let sw = 0, swy = 0, n = 0;
   for (const s of sorties) {
@@ -322,8 +404,8 @@ function probaPoint(lat, lng) {
     swy += w * (s.found ? 1 : 0);
     n++;
   }
-  const q = (h * PRIOR_POIDS + swy) / (PRIOR_POIDS + sw);
-  return { p: q * facteurMeteo(), f, n, m: meteoActuelle ? meteoActuelle.indice : null };
+  const ajust = ajustement(sw, swy);
+  return { p: clamp((m == null ? 0.5 : m) * hab * ajust, 0, 1), m, f, charge, n, ajust };
 }
 
 /* ---------- Heatmap ---------- */
@@ -352,24 +434,26 @@ function dessinerHeatmap() {
 
   // Masque forêt par balayage ligne par ligne
   const masque = new Float32Array(nb);
-  for (let r = 0; r < rows; r++) {
-    const lat = S + (r + 0.5) * dLat;
-    for (const poly of polys) {
-      if (lat < poly.b[0] || lat > poly.b[2] || poly.b[3] < W || poly.b[1] > E) continue;
-      const xs = [];
-      for (const ring of poly.rings) {
-        for (let i = 0; i < ring.length - 1; i++) {
-          const a = ring[i], b = ring[i + 1];
-          if ((a.lat > lat) !== (b.lat > lat)) xs.push(a.lon + (lat - a.lat) * (b.lon - a.lon) / (b.lat - a.lat));
+  if (foretsZone) {
+    for (let r = 0; r < rows; r++) {
+      const lat = S + (r + 0.5) * dLat;
+      for (const poly of polys) {
+        if (lat < poly.b[0] || lat > poly.b[2] || poly.b[3] < W || poly.b[1] > E) continue;
+        const xs = [];
+        for (const ring of poly.rings) {
+          for (let i = 0; i < ring.length - 1; i++) {
+            const a = ring[i], b = ring[i + 1];
+            if ((a.lat > lat) !== (b.lat > lat)) xs.push(a.lon + (lat - a.lat) * (b.lon - a.lon) / (b.lat - a.lat));
+          }
         }
-      }
-      if (xs.length < 2) continue;
-      xs.sort((x, y) => x - y);
-      for (let k = 0; k + 1 < xs.length; k += 2) {
-        const c0 = Math.max(0, Math.ceil((xs[k] - W) / dLng - 0.5));
-        const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - W) / dLng - 0.5));
-        for (let c = c0; c <= c1; c++) {
-          if (masque[r * cols + c] < poly.f) masque[r * cols + c] = poly.f;
+        if (xs.length < 2) continue;
+        xs.sort((x, y) => x - y);
+        for (let k = 0; k + 1 < xs.length; k += 2) {
+          const c0 = Math.max(0, Math.ceil((xs[k] - W) / dLng - 0.5));
+          const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - W) / dLng - 0.5));
+          for (let c = c0; c <= c1; c++) {
+            if (masque[r * cols + c] < poly.f) masque[r * cols + c] = poly.f;
+          }
         }
       }
     }
@@ -396,27 +480,31 @@ function dessinerHeatmap() {
     }
   }
 
-  // Image de la heatmap : jaune = faible, rouge = élevé
-  const fM = facteurMeteo();
+  // Image : météo x habitat x ajustement des sorties ; jaune = faible, rouge = élevé
+  const fz = foretsZone
+    ? { S: foretsZone.getSouth(), N: foretsZone.getNorth(), W: foretsZone.getWest(), E: foretsZone.getEast() }
+    : null;
   const cv = document.createElement('canvas');
   cv.width = cols;
   cv.height = rows;
   const ctx = cv.getContext('2d');
   const img = ctx.createImageData(cols, rows);
   for (let r = 0; r < rows; r++) {
+    const lat = S + (r + 0.5) * dLat;
     for (let c = 0; c < cols; c++) {
+      const lng = W + (c + 0.5) * dLng;
       const i = r * cols + c;
-      const h = masque[i] > 0 ? H_FORET * masque[i] : H_HORS;
-      const q = (h * PRIOR_POIDS + swy[i]) / (PRIOR_POIDS + sw[i]);
-      const p = q * fM;
-      if (p < P_MIN) continue;
-      const t = Math.min(1, (p - P_MIN) / (P_MAX - P_MIN));
-      const [R, G, B] = rampe(t);
+      const m0 = meteoEn(lat, lng);
+      const m = m0 == null ? 0.5 : m0;
+      const dansZone = fz && lat >= fz.S && lat <= fz.N && lng >= fz.W && lng <= fz.E;
+      const hab = !dansZone ? HAB_INCONNU : (masque[i] > 0 ? masque[i] : HAB_HORS);
+      const p = clamp(m * hab * ajustement(sw[i], swy[i]), 0, 1);
+      const [R, G, B] = rampe(p);
       const o = ((rows - 1 - r) * cols + c) * 4;
       img.data[o] = R;
       img.data[o + 1] = G;
       img.data[o + 2] = B;
-      img.data[o + 3] = Math.round(170 + 85 * t);
+      img.data[o + 3] = Math.round(90 + 150 * p);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -428,33 +516,44 @@ function dessinerHeatmap() {
 }
 
 function texteInfo() {
-  let t = meteoActuelle
-    ? `Météo : ${meteoActuelle.pluie} mm en 2 sem., ${meteoActuelle.tmoy ?? '?'} °C, indice ${Math.round(meteoActuelle.indice * 100)} %`
-    : 'Météo indisponible, indice moyen utilisé';
-  t += foretsZone
-    ? `<br>Forêts : ${polys.length} zone(s) chargée(s)`
-    : `<br>Forêts non chargées${foretErreur ? ' (' + foretErreur + ')' : ''}, appuie sur « Actualiser »`;
-  if (!sorties.length) t += '<br>Aucune sortie enregistrée';
-  return t;
+  const lignes = [];
+  const r = resumeMeteo();
+  if (r) {
+    const ind = r.min === r.max ? r.min : r.min + ' à ' + r.max;
+    lignes.push(`Météo : ${r.pluie} mm sur 2 sem., ${r.tmoy ?? '?'} °C, indice ${ind} %`);
+  } else if (chargementMeteo) {
+    lignes.push('Météo : chargement…');
+  } else {
+    lignes.push(`Météo indisponible${meteoErreur ? ' (' + meteoErreur + ')' : ''}, valeur moyenne utilisée`);
+  }
+  if (chargementForets) lignes.push('Forêts : chargement en cours…');
+  else if (foretsZone) lignes.push(`Forêts : ${polys.length} zone(s)`);
+  else lignes.push(`Forêts non chargées${foretErreur ? ' (' + foretErreur + ')' : ''}`);
+  lignes.push(sorties.length ? `${sorties.length} sortie(s) enregistrée(s)` : 'Aucune sortie enregistrée');
+  return lignes.join('<br>');
 }
 
 async function actualiser(force) {
-  const mon = ++jeton;
-  if (force) { cacheMeteo = {}; foretsZone = null; chargement = null; foretErreur = ''; }
+  if (force) {
+    grilleMeteo = null; chargementMeteo = null; meteoErreur = '';
+    foretsZone = null; chargementForets = null; foretErreur = ''; polys = [];
+    cacheMeteo = {};
+  }
   if (map.getZoom() < ZOOM_MIN) {
     chaleur.clearLayers();
-    info('Zoome sur une zone (niveau commune) pour afficher la heatmap.' + (sorties.length ? '' : '<br>Aucune sortie enregistrée'));
+    info('Zoome sur une zone (niveau commune) pour afficher la heatmap.');
     return;
   }
   const vue = map.getBounds();
-  if (!(foretsZone && foretsZone.contains(vue))) info('Chargement des forêts…');
-  await assurerForets(vue);
-  if (mon !== jeton) return;
-  info('Chargement de la météo…');
-  const c = vue.getCenter();
-  const m = await meteo(c.lat, c.lng, new Date());
-  if (mon !== jeton) return;
-  meteoActuelle = m;
+  const pm = assurerMeteo(vue);
+  const pf = assurerForets(vue);
+  info(texteInfo());
+  // Les forêts affinent la carte quand elles arrivent, sans bloquer l'affichage
+  pf.then(() => {
+    if (map.getZoom() >= ZOOM_MIN) { dessinerHeatmap(); info(texteInfo()); }
+  });
+  await pm;
+  if (map.getZoom() < ZOOM_MIN) return;
   dessinerHeatmap();
   info(texteInfo());
 }
@@ -472,7 +571,7 @@ function render() {
       fillOpacity: 0.95
     }).bindPopup(popupHtml(s)).addTo(couche);
   });
-  if (map.getZoom() >= ZOOM_MIN && !chargement) {
+  if (map.getZoom() >= ZOOM_MIN) {
     dessinerHeatmap();
     info(texteInfo());
   }
@@ -506,13 +605,13 @@ function showSpot(lat, lng) {
   const r = probaPoint(lat, lng);
   if (tempMarker) map.removeLayer(tempMarker);
   tempMarker = L.marker([lat, lng]).addTo(map);
-  const habitat = !foretsZone || !foretsZone.contains([lat, lng])
-    ? 'non chargé (zoome sur la zone)'
-    : (r.f > 0 ? 'forêt' : 'hors forêt');
+  const habitat = !r.charge ? 'non chargé' : (r.f > 0 ? 'forêt' : 'hors forêt');
   const met = r.m == null ? 'indisponible' : Math.round(r.m * 100) + ' %';
+  const effet = Math.round((r.ajust - 1) * 100);
+  const txtSorties = r.n ? `${r.n} (effet ${effet >= 0 ? '+' : ''}${effet} %)` : 'aucune';
   openPanel(`
     <h3>Probabilité estimée : ${Math.round(r.p * 100)} %</h3>
-    <p class="muted">Habitat : ${habitat}<br>Indice météo : ${met}<br>Sorties à moins de ${RAYON} m : ${r.n}</p>
+    <p class="muted">Indice météo local : ${met}<br>Habitat : ${habitat}<br>Tes sorties à moins de ${RAYON} m : ${txtSorties}</p>
     <p class="muted">Estimation indicative, pas une garantie. Ne jamais utiliser cette carte pour identifier une espèce.</p>
     <button onclick="openForm(${lat}, ${lng})">Noter une sortie ici</button>
     <button class="sec" onclick="closePanel()">Fermer</button>
