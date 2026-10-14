@@ -16,6 +16,7 @@ html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
 #bar .logo { width: 36px; height: 36px; background: #fff; border-radius: 50%; padding: 4px; box-sizing: border-box; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
 button, .btn { background: #2d5a27; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; font-size: 15px; cursor: pointer; display: inline-block; }
 button.sec { background: #888; }
+button:disabled { opacity: 0.5; }
 #espece { padding: 9px 8px; font-size: 15px; border: 0; border-radius: 8px; background: #fff; color: #2d5a27; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 46vw; }
 #panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 70%; overflow: auto; background: #fff; border-radius: 16px 16px 0 0; padding: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,.2); display: none; z-index: 2000; }
 #panel label { display: block; margin: 10px 0; font-size: 14px; }
@@ -25,6 +26,7 @@ button.sec { background: #888; }
 .muted { color: #666; font-size: 13px; }
 .esp { margin: 8px 0; font-size: 14px; }
 .esp .conf { color: #b5402a; font-size: 12px; }
+.res { margin: 10px 0; padding-bottom: 8px; border-bottom: 1px solid #eee; font-size: 14px; }
 .alerte { background: #fdecea; color: #8a1c12; border-radius: 8px; padding: 8px; font-size: 13px; }
 .legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 230px; }
 .legende .grad { width: 150px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, rgb(255,235,100), rgb(255,140,0), rgb(200,0,0)); }
@@ -32,6 +34,8 @@ button.sec { background: #888; }
 .legende .version { color: #999; font-weight: normal; margin-left: 6px; }
 #info { margin-top: 4px; }
 .fond-gris { filter: grayscale(1) brightness(1.05) contrast(0.85); }
+.spot-icon { background: none; border: 0; }
+.spot { width: 28px; height: 28px; border-radius: 50%; background: #2d5a27; color: #fff; border: 2px solid #fff; box-sizing: border-box; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
 </style>
 </head>
 <body>
@@ -44,27 +48,31 @@ button.sec { background: #888; }
   </svg>
   <select id="espece" onchange="changerEspece()"></select>
   <button onclick="locate()">Ma position</button>
+  <button onclick="ouvrirRecherche()">Meilleur spot</button>
   <button class="sec" onclick="menu()">Menu</button>
 </div>
 <div id="map"></div>
 <div id="panel"></div>
 
 <script>
-const VERSION = 'v6';
+const VERSION = 'v8';
 const KEY = 'cueillette_sorties';
 const KEY_ESP = 'cueillette_espece';
 const RAYON = 300;          // m : portée d'une sortie autour de son point
 const DEMI_VIE = 365;       // jours : une sortie garde la moitié de son poids après 1 an
 const AJUST_MAX = 0.4;      // influence maximale des sorties : plus ou moins 40 %
 const P_PLAFOND = 0.85;     // probabilité maximale sans sortie (affichée en rouge)
-const ZOOM_MIN = 13;        // zoom minimal pour calculer la heatmap
+const ZOOM_MIN = 9;         // zoom minimal pour afficher la heatmap (échelle département)
+const ZOOM_HAB = 13;        // zoom à partir duquel les forêts détaillées sont chargées
+const HAB_INCONNU = 0.7;    // poids de l'habitat quand il n'est pas connu
 const COLONNES = 200;       // résolution horizontale de la heatmap
 const OPACITE = 0.85;       // opacité générale de la heatmap
-const GM_COLS = 8;          // grille météo : colonnes
-const GM_ROWS = 10;         // grille météo : lignes
-const GE_COLS = 15;         // grille d'altitude : colonnes
-const GE_ROWS = 20;         // grille d'altitude : lignes
+const GM_COLS = 10;         // grille météo : colonnes
+const GM_ROWS = 12;         // grille météo : lignes
+const GE_COLS = 20;         // grille d'altitude : colonnes
+const GE_ROWS = 28;         // grille d'altitude : lignes
 const GRADIENT_T = 0.0065;  // °C perdus par mètre d'altitude
+const NB_SPOTS = 5;         // nombre de spots proposés par la recherche
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
@@ -133,6 +141,7 @@ const ESPECES = [
     mois: [0, 0, 0.6, 1, 0.7, 0.1, 0, 0, 0, 0, 0, 0], temp: [6, 9, 15, 19], pluie: 25, gel: 0.5,
     conf: "gyromitre (mortel)" }
 ];
+ESPECES.forEach(e => { e.habMax = Math.max(...Object.values(e.hab)); });
 
 let sorties = JSON.parse(localStorage.getItem(KEY) || '[]');
 let especeSel = localStorage.getItem(KEY_ESP) || 'toutes';
@@ -147,6 +156,9 @@ let envErreur = '';
 let chargementEnv = null;
 let cacheMeteo = {};
 let minuterie = null;
+let derniersSpots = [];
+let derniereRecherche = null;
+let rechercheEnCours = false;
 
 /* ---------- Carte ---------- */
 
@@ -172,6 +184,7 @@ map.getPane('chaleur').style.pointerEvents = 'none';
 
 const chaleur = L.layerGroup().addTo(map);
 const couche = L.layerGroup().addTo(map);
+const resultats = L.layerGroup().addTo(map);
 
 L.control.layers({
   'Plan gris': fondGris,
@@ -223,6 +236,14 @@ function distance(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+function direction(lat1, lng1, lat2, lng2) {
+  const rad = x => x * Math.PI / 180;
+  const y = Math.sin(rad(lng2 - lng1)) * Math.cos(rad(lat2));
+  const x = Math.cos(rad(lat1)) * Math.sin(rad(lat2)) - Math.sin(rad(lat1)) * Math.cos(rad(lat2)) * Math.cos(rad(lng2 - lng1));
+  const b = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  return ['au nord', 'au nord-est', "à l'est", 'au sud-est', 'au sud', 'au sud-ouest', "à l'ouest", 'au nord-ouest'][Math.round(b / 45) % 8];
+}
+
 async function fetchTimeout(url, opts, ms) {
   const ctrl = new AbortController();
   const minut = setTimeout(() => ctrl.abort(), ms);
@@ -231,6 +252,17 @@ async function fetchTimeout(url, opts, ms) {
   } finally {
     clearTimeout(minut);
   }
+}
+
+function maPosition() {
+  return new Promise((ok, ko) => {
+    if (!navigator.geolocation) return ko(new Error('indisponible'));
+    navigator.geolocation.getCurrentPosition(
+      p => ok([p.coords.latitude, p.coords.longitude]),
+      ko,
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
 }
 
 function trapeze(x, p) {
@@ -252,6 +284,13 @@ function facteurSaison(mois, date) {
 function majSaisons() {
   const d = new Date();
   ESPECES.forEach(e => { e.saisonAuj = facteurSaison(e.mois, d); });
+}
+
+// Les forêts sont utilisées en vue détaillée, ou un peu avant si elles sont déjà chargées
+function habitatsActifs() {
+  if (!habZone) return false;
+  const z = map.getZoom();
+  return z >= ZOOM_HAB || (z >= ZOOM_HAB - 2 && habZone.intersects(map.getBounds()));
 }
 
 /* ---------- Météo et altitude ---------- */
@@ -381,15 +420,17 @@ function zoneEnv(vue) {
   return vue.pad(0.3).extend(L.latLngBounds([c.lat - 0.03, c.lng - 0.045], [c.lat + 0.03, c.lng + 0.045]));
 }
 
+// Recharge si la zone n'est pas couverte ou si l'on a beaucoup zoomé depuis le dernier chargement
 function assurerEnv(vue) {
-  if (env && env.zone.contains(vue) && Date.now() - env.t < 2 * 3600000) return Promise.resolve();
-  if (chargementEnv && chargementEnv.zone.contains(vue)) return chargementEnv.promise;
+  const z = map.getZoom();
+  if (env && env.zone.contains(vue) && z <= env.zoom + 1 && Date.now() - env.t < 2 * 3600000) return Promise.resolve();
+  if (chargementEnv && chargementEnv.zone.contains(vue) && z <= chargementEnv.zoom + 1) return chargementEnv.promise;
   const zone = zoneEnv(vue);
   const promise = Promise.all([chargerMeteoGrille(zone), chargerAltitudes(zone).catch(() => null)])
-    .then(([meteo, alt]) => { env = { zone, meteo, alt, t: Date.now() }; envErreur = ''; })
+    .then(([meteo, alt]) => { env = { zone, meteo, alt, zoom: z, t: Date.now() }; envErreur = ''; })
     .catch(e => { envErreur = e.message || 'erreur'; })
     .finally(() => { if (chargementEnv && chargementEnv.promise === promise) chargementEnv = null; });
-  chargementEnv = { zone, promise };
+  chargementEnv = { zone, zoom: z, promise };
   return promise;
 }
 
@@ -408,16 +449,16 @@ function interp(vals, w) {
 }
 
 // Conditions locales : météo interpolée, température corrigée par l'altitude
-function envEn(lat, lng) {
-  if (!env) return null;
-  const g = env.meteo;
+function envEn(lat, lng, E = env) {
+  if (!E) return null;
+  const g = E.meteo;
   const w = bilin(g, lat, lng);
   let t = interp(g.tmoy, w);
   let tmin = interp(g.tmin, w);
   const pluie = interp(g.pluie, w);
   let alt = null;
-  if (env.alt) {
-    alt = interp(env.alt.vals, bilin(env.alt, lat, lng));
+  if (E.alt) {
+    alt = interp(E.alt.vals, bilin(E.alt, lat, lng));
     if (g.elev) {
       const dz = alt - interp(g.elev, w);
       t -= GRADIENT_T * dz;
@@ -457,7 +498,7 @@ function ajouterPoly(liste, rings, code) {
   liste.push({ rings, b, h: H[code] });
 }
 
-async function chargerIGN(zone) {
+async function chargerIGN(zone, pagesMax = 6) {
   const S = zone.getSouth(), N = zone.getNorth(), W = zone.getWest(), E = zone.getEast();
   const base = 'https://data.geopf.fr/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature' +
                '&TYPENAMES=LANDCOVER.FORESTINVENTORY.V2:formation_vegetale' +
@@ -465,7 +506,7 @@ async function chargerIGN(zone) {
                `&BBOX=${S.toFixed(5)},${W.toFixed(5)},${N.toFixed(5)},${E.toFixed(5)},urn:ogc:def:crs:EPSG::4326`;
   const liste = [];
   let lonlat = null;
-  for (let page = 0; page < 6; page++) {
+  for (let page = 0; page < pagesMax; page++) {
     let feats;
     try {
       const r = await fetchTimeout(base + `&COUNT=1000&STARTINDEX=${page * 1000}`, {}, 25000);
@@ -539,9 +580,9 @@ async function chargerOSM(zone) {
   return liste;
 }
 
-async function chargerHabitat(zone) {
+async function chargerHabitat(zone, pagesMax = 6) {
   try {
-    const l = await chargerIGN(zone);
+    const l = await chargerIGN(zone, pagesMax);
     if (l.length) return { liste: l, source: 'IGN BD Forêt' };
   } catch (e) {}
   return { liste: await chargerOSM(zone), source: 'OpenStreetMap' };
@@ -564,7 +605,8 @@ function assurerHab(vue) {
   return promise;
 }
 
-function habitatEn(lat, lng) {
+// Habitat d'un point dans les données chargées, quel que soit le zoom
+function habitatBrut(lat, lng) {
   if (!habZone || !habZone.contains([lat, lng])) return INCONNU;
   let code = H.ouvert;
   for (const poly of polys) {
@@ -582,17 +624,70 @@ function habitatEn(lat, lng) {
   return code;
 }
 
+function habitatEn(lat, lng) {
+  return habitatsActifs() ? habitatBrut(lat, lng) : INCONNU;
+}
+
+// Habitats sur une grille, par balayage ligne par ligne
+function rasteriserHabitats(S, W, dLat, dLng, rows, cols) {
+  const E = W + cols * dLng;
+  const masque = new Uint8Array(rows * cols);
+  for (let r = 0; r < rows; r++) {
+    const lat = S + (r + 0.5) * dLat;
+    for (const poly of polys) {
+      if (lat < poly.b[0] || lat > poly.b[2] || poly.b[3] < W || poly.b[1] > E) continue;
+      const xs = [];
+      for (const ring of poly.rings) {
+        for (let k = 0; k < ring.length - 1; k++) {
+          const a = ring[k], b = ring[k + 1];
+          if ((a[0] > lat) !== (b[0] > lat)) xs.push(a[1] + (lat - a[0]) * (b[1] - a[1]) / (b[0] - a[0]));
+        }
+      }
+      if (xs.length < 2) continue;
+      xs.sort((x, y) => x - y);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const c0 = Math.max(0, Math.ceil((xs[k] - W) / dLng - 0.5));
+        const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - W) / dLng - 0.5));
+        for (let c = c0; c <= c1; c++) {
+          const i = r * cols + c;
+          if (masque[i] === H.ouvert || masque[i] === H.foret) masque[i] = poly.h;
+        }
+      }
+    }
+  }
+  // Hors de la zone chargée : habitat inconnu
+  const hz = { S: habZone.getSouth(), N: habZone.getNorth(), W: habZone.getWest(), E: habZone.getEast() };
+  for (let r = 0; r < rows; r++) {
+    const lat = S + (r + 0.5) * dLat;
+    for (let c = 0; c < cols; c++) {
+      const lng = W + (c + 0.5) * dLng;
+      if (lat < hz.S || lat > hz.N || lng < hz.W || lng > hz.E) masque[r * cols + c] = INCONNU;
+    }
+  }
+  return masque;
+}
+
 /* ---------- Calcul par espèce ---------- */
 
 // Météo et saison d'abord, habitat ensuite
 function scoreEspece(e, hab, en) {
-  const h = hab === INCONNU ? 0.5 : (e.hab[HABITATS[hab]] || 0);
+  const h = hab === INCONNU ? HAB_INCONNU * e.habMax : (e.hab[HABITATS[hab]] || 0);
   if (!h || !e.saisonAuj) return 0;
   const fT = trapeze(en.t, e.temp);
   if (!fT) return 0;
   const fP = Math.min(1, en.pluie / e.pluie);
   const fG = en.tmin < -2 ? e.gel : 1;
   return P_PLAFOND * e.saisonAuj * h * fT * fP * fG;
+}
+
+function scoreCellule(esp, hab, en) {
+  if (esp) return scoreEspece(esp, hab, en);
+  let s = 0;
+  for (const e of ESPECES) {
+    const x = scoreEspece(e, hab, en);
+    if (x > s) s = x;
+  }
+  return s;
 }
 
 function poidsSortie(s, now) {
@@ -617,10 +712,35 @@ function sortiesPour(id) {
   return id === 'toutes' ? sorties : sorties.filter(s => !s.espece || s.espece === id);
 }
 
-function especesEn(lat, lng) {
+// Influence des sorties sur une grille
+function accumulerSorties(liste, S, W, dLat, dLng, rows, cols, cosc) {
+  const nb = rows * cols;
+  const sw = new Float32Array(nb), swy = new Float32Array(nb);
+  const mLat = 111320, mLng = 111320 * cosc, now = Date.now();
+  const nr = Math.ceil(RAYON / (dLat * mLat)), nc = Math.ceil(RAYON / (dLng * mLng));
+  for (const s of liste) {
+    const w0 = poidsSortie(s, now);
+    if (w0 < 0.01) continue;
+    const r0 = Math.floor((s.lat - S) / dLat), c0 = Math.floor((s.lng - W) / dLng);
+    for (let r = Math.max(0, r0 - nr); r <= Math.min(rows - 1, r0 + nr); r++) {
+      for (let c = Math.max(0, c0 - nc); c <= Math.min(cols - 1, c0 + nc); c++) {
+        const dy = (S + (r + 0.5) * dLat - s.lat) * mLat;
+        const dx = (W + (c + 0.5) * dLng - s.lng) * mLng;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > RAYON) continue;
+        const w = w0 * (1 - d / RAYON);
+        sw[r * cols + c] += w;
+        swy[r * cols + c] += w * (s.found ? 1 : 0);
+      }
+    }
+  }
+  return { sw, swy };
+}
+
+function especesEn(lat, lng, brut = false, E = env) {
   majSaisons();
-  const en = envEn(lat, lng) || DEFAUT_ENV;
-  const hab = habitatEn(lat, lng);
+  const en = envEn(lat, lng, E) || DEFAUT_ENV;
+  const hab = brut ? habitatBrut(lat, lng) : habitatEn(lat, lng);
   const now = Date.now();
   const proches = sorties.map(s => ({ s, d: distance(lat, lng, s.lat, s.lng) })).filter(x => x.d <= RAYON);
   const ajustPour = id => {
@@ -665,61 +785,8 @@ function dessinerHeatmap() {
   const dLng = (E - W) / cols;
   const dLat = dLng * cosc;
   const rows = Math.ceil((N - S) / dLat);
-  const nb = rows * cols;
-
-  // Habitats par balayage ligne par ligne
-  const masque = new Uint8Array(nb);
-  if (habZone) {
-    for (let r = 0; r < rows; r++) {
-      const lat = S + (r + 0.5) * dLat;
-      for (const poly of polys) {
-        if (lat < poly.b[0] || lat > poly.b[2] || poly.b[3] < W || poly.b[1] > E) continue;
-        const xs = [];
-        for (const ring of poly.rings) {
-          for (let k = 0; k < ring.length - 1; k++) {
-            const a = ring[k], b = ring[k + 1];
-            if ((a[0] > lat) !== (b[0] > lat)) xs.push(a[1] + (lat - a[0]) * (b[1] - a[1]) / (b[0] - a[0]));
-          }
-        }
-        if (xs.length < 2) continue;
-        xs.sort((x, y) => x - y);
-        for (let k = 0; k + 1 < xs.length; k += 2) {
-          const c0 = Math.max(0, Math.ceil((xs[k] - W) / dLng - 0.5));
-          const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - W) / dLng - 0.5));
-          for (let c = c0; c <= c1; c++) {
-            const i = r * cols + c;
-            if (masque[i] === H.ouvert || masque[i] === H.foret) masque[i] = poly.h;
-          }
-        }
-      }
-    }
-  }
-  const hz = habZone
-    ? { S: habZone.getSouth(), N: habZone.getNorth(), W: habZone.getWest(), E: habZone.getEast() }
-    : null;
-
-  // Ajustement par les sorties
-  const sw = new Float32Array(nb), swy = new Float32Array(nb);
-  const mLat = 111320, mLng = 111320 * cosc, now = Date.now();
-  const nr = Math.ceil(RAYON / (dLat * mLat)), nc = Math.ceil(RAYON / (dLng * mLng));
-  for (const s of sortiesPour(especeSel)) {
-    const w0 = poidsSortie(s, now);
-    if (w0 < 0.01) continue;
-    const r0 = Math.floor((s.lat - S) / dLat), c0 = Math.floor((s.lng - W) / dLng);
-    for (let r = Math.max(0, r0 - nr); r <= Math.min(rows - 1, r0 + nr); r++) {
-      for (let c = Math.max(0, c0 - nc); c <= Math.min(cols - 1, c0 + nc); c++) {
-        const dy = (S + (r + 0.5) * dLat - s.lat) * mLat;
-        const dx = (W + (c + 0.5) * dLng - s.lng) * mLng;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d > RAYON) continue;
-        const w = w0 * (1 - d / RAYON);
-        sw[r * cols + c] += w;
-        swy[r * cols + c] += w * (s.found ? 1 : 0);
-      }
-    }
-  }
-
-  // Image : jaune = faible, rouge = élevé
+  const masque = habitatsActifs() ? rasteriserHabitats(S, W, dLat, dLng, rows, cols) : null;
+  const { sw, swy } = accumulerSorties(sortiesPour(especeSel), S, W, dLat, dLng, rows, cols, cosc);
   const esp = ESPECES.find(e => e.id === especeSel);
   const cv = document.createElement('canvas');
   cv.width = cols;
@@ -731,19 +798,9 @@ function dessinerHeatmap() {
     for (let c = 0; c < cols; c++) {
       const lng = W + (c + 0.5) * dLng;
       const i = r * cols + c;
-      const dansZone = hz && lat >= hz.S && lat <= hz.N && lng >= hz.W && lng <= hz.E;
-      const hab = dansZone ? masque[i] : INCONNU;
+      const hab = masque ? masque[i] : INCONNU;
       const en = envEn(lat, lng) || DEFAUT_ENV;
-      let s = 0;
-      if (esp) {
-        s = scoreEspece(esp, hab, en);
-      } else {
-        for (const e of ESPECES) {
-          const x = scoreEspece(e, hab, en);
-          if (x > s) s = x;
-        }
-      }
-      const p = clamp(s * ajustement(sw[i], swy[i]), 0, 1);
+      const p = clamp(scoreCellule(esp, hab, en) * ajustement(sw[i], swy[i]), 0, 1);
       const t = clamp(p / P_PLAFOND, 0, 1);
       const [R, G, B] = rampe(t);
       const o = ((rows - 1 - r) * cols + c) * 4;
@@ -768,40 +825,267 @@ function texteInfo() {
     const pl = g.pMin === g.pMax ? g.pMin : `${g.pMin} à ${g.pMax}`;
     const tp = Math.abs(g.tMax - g.tMin) < 0.1 ? f1(g.tMin) : `${f1(g.tMin)} à ${f1(g.tMax)}`;
     l.push(`Pluie 2 sem. : ${pl} mm, temp. moy. : ${tp} °C`);
+    if (chargementEnv) l.push('Météo : affinage en cours…');
   } else if (chargementEnv) {
     l.push('Météo : chargement…');
   } else {
     l.push(`Météo indisponible${envErreur ? ' (' + envErreur + ')' : ''}`);
   }
-  if (chargementHab) l.push('Habitats : chargement…');
-  else if (habZone) l.push(`Habitats : ${polys.length} zones (${habSource})`);
+  const z = map.getZoom();
+  if (z >= ZOOM_HAB && chargementHab) l.push('Habitats : chargement…');
+  else if (habitatsActifs()) l.push(`Habitats : ${polys.length} zones (${habSource})`);
+  else if (z < ZOOM_HAB) l.push("Vue d'ensemble : météo, altitude et saison. Zoome davantage pour ajouter les forêts.");
   else l.push(`Habitats non chargés${habErreur ? ' (' + habErreur + ')' : ''}`);
   l.push(sorties.length ? `${sorties.length} sortie(s) enregistrée(s)` : 'Aucune sortie enregistrée');
   return l.join('<br>');
 }
 
 async function actualiser(force) {
+  if (rechercheEnCours) return;
   if (force) {
     env = null; chargementEnv = null; envErreur = '';
     habZone = null; chargementHab = null; habErreur = ''; habSource = ''; polys = [];
     cacheMeteo = {};
   }
-  if (map.getZoom() < ZOOM_MIN) {
+  const z = map.getZoom();
+  if (z < ZOOM_MIN) {
     chaleur.clearLayers();
-    info('Zoome sur une zone (niveau commune) pour afficher la heatmap.');
+    info('Zoome un peu (échelle d\'un département) pour afficher la heatmap.');
     return;
   }
   const vue = map.getBounds();
   const pe = assurerEnv(vue);
-  const ph = assurerHab(vue);
+  if (z >= ZOOM_HAB) {
+    assurerHab(vue).then(() => {
+      if (map.getZoom() >= ZOOM_MIN && (env || !chargementEnv)) { dessinerHeatmap(); info(texteInfo()); }
+    });
+  }
+  // Affichage immédiat avec les données déjà disponibles, puis affinage
+  if (env && env.zone.contains(vue)) dessinerHeatmap();
   info(texteInfo());
-  ph.then(() => {
-    if (map.getZoom() >= ZOOM_MIN && (env || !chargementEnv)) { dessinerHeatmap(); info(texteInfo()); }
-  });
   await pe;
   if (map.getZoom() < ZOOM_MIN) return;
   dessinerHeatmap();
   info(texteInfo());
+}
+
+/* ---------- Recherche du meilleur spot ---------- */
+
+function ouvrirRecherche() {
+  const opts = '<option value="toutes">Toutes espèces</option>' +
+    ESPECES.map(e => `<option value="${e.id}"${e.id === especeSel ? ' selected' : ''}>${e.nom}</option>`).join('');
+  openPanel(`
+    <h3>Trouver le meilleur spot</h3>
+    <label>Champignon recherché<select id="r-esp">${opts}</select></label>
+    <label>Distance maximale
+      <select id="r-rayon">
+        <option value="3">3 km</option>
+        <option value="5" selected>5 km</option>
+        <option value="10">10 km</option>
+      </select>
+    </label>
+    <p class="muted">La recherche part de ta position. Compte quelques secondes, davantage pour 10 km.</p>
+    <p id="r-etat" class="muted"></p>
+    <button id="r-go" onclick="lancerRecherche()">Lancer la recherche</button>
+    <button class="sec" onclick="closePanel()">Annuler</button>
+  `);
+}
+
+function calculerSpots(centre, R, espId, habOk, E) {
+  majSaisons();
+  const lat0 = centre[0], lng0 = centre[1];
+  const pas = R > 6000 ? 150 : 100;
+  const cosc = Math.cos(lat0 * Math.PI / 180);
+  const mLat = 111320, mLng = 111320 * cosc;
+  const dLat = pas / mLat, dLng = pas / mLng;
+  const n = Math.ceil(2 * R / pas);
+  const S = lat0 - R / mLat, W = lng0 - R / mLng;
+  const masque = habOk ? rasteriserHabitats(S, W, dLat, dLng, n, n) : null;
+  const { sw, swy } = accumulerSorties(sortiesPour(espId), S, W, dLat, dLng, n, n, cosc);
+  const esp = ESPECES.find(e => e.id === espId);
+  const p = new Float32Array(n * n).fill(-1);
+  const dist = new Float32Array(n * n);
+  for (let r = 0; r < n; r++) {
+    const lat = S + (r + 0.5) * dLat;
+    for (let c = 0; c < n; c++) {
+      const lng = W + (c + 0.5) * dLng;
+      const i = r * n + c;
+      const d = Math.hypot((lat - lat0) * mLat, (lng - lng0) * mLng);
+      if (d > R) continue;
+      dist[i] = d;
+      const hab = masque ? masque[i] : INCONNU;
+      const en = envEn(lat, lng, E) || DEFAUT_ENV;
+      p[i] = clamp(scoreCellule(esp, hab, en) * ajustement(sw[i], swy[i]), 0, 1);
+    }
+  }
+  // Lissage sur 3 x 3 cases : un spot est une zone favorable, pas un point isolé
+  const lisse = new Float32Array(n * n).fill(-1);
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const i = r * n + c;
+      if (p[i] < 0) continue;
+      let s = 0, k = 0;
+      for (let dr = -1; dr <= 1; dr++) {
+        for (let dc = -1; dc <= 1; dc++) {
+          const rr = r + dr, cc = c + dc;
+          if (rr < 0 || rr >= n || cc < 0 || cc >= n) continue;
+          const j = rr * n + cc;
+          if (p[j] >= 0) { s += p[j]; k++; }
+        }
+      }
+      lisse[i] = s / k;
+    }
+  }
+  // Classement : qualité de la zone, légère préférence pour les spots proches
+  const idx = [];
+  for (let i = 0; i < n * n; i++) if (lisse[i] >= 0.05) idx.push(i);
+  const rang = i => lisse[i] * (1 - 0.2 * dist[i] / R);
+  idx.sort((a, b) => rang(b) - rang(a));
+  const sep = Math.max(400, R / 6);
+  const choisis = [];
+  for (const i of idx) {
+    const lat = S + (Math.floor(i / n) + 0.5) * dLat;
+    const lng = W + (i % n + 0.5) * dLng;
+    if (choisis.every(s => distance(lat, lng, s.lat, s.lng) >= sep)) choisis.push({ lat, lng, d: dist[i] });
+    if (choisis.length >= NB_SPOTS) break;
+  }
+  return choisis;
+}
+
+async function lancerRecherche() {
+  const espId = document.getElementById('r-esp').value;
+  const R = parseFloat(document.getElementById('r-rayon').value) * 1000;
+  const bouton = document.getElementById('r-go');
+  const etat = msg => { const el = document.getElementById('r-etat'); if (el) el.textContent = msg; };
+  bouton.disabled = true;
+  rechercheEnCours = true;
+
+  // La heatmap suit l'espèce recherchée
+  especeSel = espId;
+  sel.value = espId;
+  localStorage.setItem(KEY_ESP, espId);
+  majLegende();
+
+  try {
+    etat('Localisation…');
+    let centre, surCarte = false;
+    try {
+      centre = await maPosition();
+    } catch (e) {
+      const c = map.getCenter();
+      centre = [c.lat, c.lng];
+      surCarte = true;
+    }
+    const zone = L.latLng(centre[0], centre[1]).toBounds(2.2 * R);
+
+    etat('Chargement de la météo et de l\'altitude…');
+    let envR;
+    try {
+      const [meteo, alt] = await Promise.all([chargerMeteoGrille(zone), chargerAltitudes(zone).catch(() => null)]);
+      envR = { zone, meteo, alt, zoom: ZOOM_HAB, t: Date.now() };
+      env = envR;
+      envErreur = '';
+    } catch (e) {
+      etat('Météo indisponible pour le moment, réessaie plus tard.');
+      bouton.disabled = false;
+      return;
+    }
+
+    etat('Chargement des forêts… (plus long pour 10 km)');
+    let habOk = false;
+    try {
+      const r = await chargerHabitat(zone, 10);
+      polys = r.liste; habZone = zone; habSource = r.source; habErreur = ''; habOk = true;
+    } catch (e) {
+      habErreur = e.message || 'erreur';
+    }
+
+    etat('Calcul des meilleurs spots…');
+    await new Promise(res => setTimeout(res, 50));
+    const esp = ESPECES.find(e => e.id === espId);
+    derniersSpots = calculerSpots(centre, R, espId, habOk, envR).map(s => {
+      const r = especesEn(s.lat, s.lng, true, envR);
+      return Object.assign(s, {
+        p: esp ? r.liste.find(x => x.e.id === esp.id).p : r.pToutes,
+        hab: r.hab,
+        alt: r.en.alt,
+        top: r.liste[0],
+        dir: direction(centre[0], centre[1], s.lat, s.lng)
+      });
+    }).sort((a, b) => b.p - a.p);
+    derniereRecherche = { espId, R, surCarte, habOk, centre };
+    dessinerResultats();
+    afficherPanneauResultats();
+  } finally {
+    rechercheEnCours = false;
+  }
+}
+
+function dessinerResultats() {
+  resultats.clearLayers();
+  const rq = derniereRecherche;
+  if (!rq) return;
+  L.circle(rq.centre, { radius: rq.R, color: '#2d5a27', weight: 2, fill: false, dashArray: '6 6', interactive: false }).addTo(resultats);
+  if (!rq.surCarte) {
+    L.circleMarker(rq.centre, { radius: 7, color: '#fff', weight: 2, fillColor: '#1e6fd9', fillOpacity: 1, interactive: false }).addTo(resultats);
+  }
+  derniersSpots.forEach((s, i) => {
+    L.marker([s.lat, s.lng], {
+      icon: L.divIcon({ className: 'spot-icon', html: `<div class="spot">${i + 1}</div>`, iconSize: [28, 28], iconAnchor: [14, 14] })
+    }).on('click', () => voirSpot(i)).addTo(resultats);
+  });
+  map.fitBounds(L.latLng(rq.centre[0], rq.centre[1]).toBounds(2 * rq.R), {
+    paddingTopLeft: [20, 80],
+    paddingBottomRight: [20, Math.round(window.innerHeight * 0.45)]
+  });
+}
+
+function afficherPanneauResultats() {
+  const rq = derniereRecherche;
+  if (!rq) return;
+  const esp = ESPECES.find(e => e.id === rq.espId);
+  let html = `<h3>Meilleurs spots : ${esp ? esp.nom : 'toutes espèces'}</h3>`;
+  html += `<p class="muted">Rayon de ${rq.R / 1000} km ${rq.surCarte ? 'autour du centre de la carte (position indisponible)' : 'autour de ta position'}.</p>`;
+  if (!rq.habOk) html += '<p class="muted">Forêts indisponibles : classement basé sur la météo, l\'altitude et la saison.</p>';
+  if (!derniersSpots.length) {
+    html += '<p>Aucun spot favorable dans ce rayon pour le moment. La saison ou la météo ne s\'y prêtent pas : essaie un rayon plus grand ou une autre espèce.</p>';
+  }
+  derniersSpots.forEach((s, i) => {
+    const hab = s.hab === INCONNU ? 'habitat inconnu' : NOMS_HAB[HABITATS[s.hab]];
+    const alt = s.alt != null ? `, ${Math.round(s.alt)} m` : '';
+    const top = !esp && s.top && s.top.p > 0 ? `<br>Plus probable : ${s.top.e.nom}` : '';
+    html += `<div class="res"><b>${i + 1}.</b> ${Math.round(s.p * 100)} % · ${f1(s.d / 1000)} km ${s.dir}` +
+            `<br><span class="muted">${hab}${alt}${top}</span><br>` +
+            `<button onclick="voirSpot(${i})">Voir</button><button class="sec" onclick="itineraire(${i})">Itinéraire</button></div>`;
+  });
+  html += `<p class="alerte">Vérifie que l'accès et la cueillette sont autorisés sur place (propriété privée, forêt domaniale, réserve). Fais contrôler toute récolte par un pharmacien ou une société mycologique.</p>
+    <button class="sec" onclick="effacerResultats()">Effacer les résultats</button>
+    <button class="sec" onclick="closePanel()">Fermer</button>`;
+  openPanel(html);
+}
+
+function voirSpot(i) {
+  const s = derniersSpots[i];
+  if (!s) return;
+  map.setView([s.lat, s.lng], 15);
+  showSpot(s.lat, s.lng);
+}
+
+function itineraire(i) {
+  const s = derniersSpots[i];
+  if (!s) return;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent);
+  const url = ios
+    ? `https://maps.apple.com/?daddr=${s.lat},${s.lng}&dirflg=d`
+    : `https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}`;
+  window.open(url, '_blank');
+}
+
+function effacerResultats() {
+  resultats.clearLayers();
+  derniersSpots = [];
+  derniereRecherche = null;
+  closePanel();
 }
 
 /* ---------- Interface ---------- */
@@ -877,7 +1161,9 @@ function showSpot(lat, lng) {
   const esp = ESPECES.find(e => e.id === especeSel);
   const titre = esp ? esp.nom : 'Toutes espèces';
   const selP = esp ? r.liste.find(x => x.e.id === esp.id).p : r.pToutes;
-  const hab = r.hab === INCONNU ? 'non chargé' : NOMS_HAB[HABITATS[r.hab]];
+  const hab = r.hab !== INCONNU
+    ? NOMS_HAB[HABITATS[r.hab]]
+    : (map.getZoom() < ZOOM_HAB ? 'zoome davantage pour le connaître' : 'non chargé');
   let envTxt = `Habitat : ${hab}`;
   if (r.en.alt != null) envTxt += `<br>Altitude : ${Math.round(r.en.alt)} m`;
   envTxt += `<br>Pluie (2 sem.) : ${Math.round(r.en.pluie)} mm<br>Température moyenne (10 j) : ${f1(r.en.t)} °C`;
@@ -887,6 +1173,7 @@ function showSpot(lat, lng) {
     ? visibles.map(x => `<div class="esp"><b>${x.e.nom}</b> <i>${x.e.latin}</i> : ${Math.round(x.p * 100)} %` +
         (x.e.conf ? `<br><span class="conf">Confusions possibles : ${x.e.conf}</span>` : '') + '</div>').join('')
     : '<p class="muted">Aucune espèce favorisée par les conditions actuelles à cet endroit.</p>';
+  const retour = derniersSpots.length ? '<button class="sec" onclick="afficherPanneauResultats()">Résultats</button>' : '';
   openPanel(`
     <h3>${titre} : ${Math.round(selP * 100)} %</h3>
     <p class="muted">${envTxt}</p>
@@ -894,6 +1181,7 @@ function showSpot(lat, lng) {
     ${espHtml}
     <p class="alerte">L'amanite phalloïde, mortelle, pousse dans les mêmes forêts de l'été à la fin de l'automne. Cette carte n'identifie aucun champignon : fais contrôler toute récolte par un pharmacien ou une société mycologique.</p>
     <button onclick="openForm(${lat}, ${lng})">Noter une sortie ici</button>
+    ${retour}
     <button class="sec" onclick="closePanel()">Fermer</button>
   `);
 }
@@ -936,13 +1224,14 @@ async function saveSortie(lat, lng) {
   save(); render(); closePanel();
 }
 
-function locate() {
-  navigator.geolocation.getCurrentPosition(pos => {
-    const { latitude: lat, longitude: lng } = pos.coords;
+async function locate() {
+  try {
+    const [lat, lng] = await maPosition();
     map.setView([lat, lng], 15);
     showSpot(lat, lng);
-  }, () => alert('Position indisponible. Vérifie l\'autorisation de localisation.'),
-  { enableHighAccuracy: true, timeout: 10000 });
+  } catch (e) {
+    alert('Position indisponible. Vérifie l\'autorisation de localisation.');
+  }
 }
 
 function exporter() {
