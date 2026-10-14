@@ -17,15 +17,16 @@ html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
 button, .btn { background: #2d5a27; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; font-size: 15px; cursor: pointer; }
 button.sec { background: #888; }
 #bar .btn { background: #fff; color: #2d5a27; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-#vide { position: absolute; top: 64px; left: 10px; right: 64px; z-index: 1000; background: #fff; border-radius: 8px; padding: 10px 12px; font-size: 14px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); display: none; }
 #panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 65%; overflow: auto; background: #fff; border-radius: 16px 16px 0 0; padding: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,.2); display: none; z-index: 2000; }
 #panel label { display: block; margin: 10px 0; font-size: 14px; }
 #panel input, #panel select, #panel textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }
 #panel button { margin: 10px 6px 0 0; }
 .muted { color: #666; font-size: 13px; }
-.legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-.legende .grad { width: 130px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, hsl(0,80%,42%), hsl(60,80%,42%), hsl(120,80%,32%)); }
-.legende .ext { display: flex; justify-content: space-between; }
+.legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 210px; }
+.legende .grad { width: 140px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, rgb(40,90,255), rgb(0,190,120), rgb(255,215,0), rgb(230,30,30)); }
+.legende .ext { display: flex; justify-content: space-between; width: 140px; }
+#info { margin-top: 4px; }
+.leaflet-image-layer.chaleur { filter: blur(2px); }
 </style>
 </head>
 <body>
@@ -37,28 +38,42 @@ button.sec { background: #888; }
     <rect x="25" y="30" width="14" height="24" rx="5" fill="#f2e6d0"/>
   </svg>
   <button onclick="locate()">Ma position</button>
+  <button onclick="actualiser(true)">Actualiser</button>
   <button onclick="exporter()">Exporter</button>
   <label class="btn">Importer<input type="file" accept="application/json" onchange="importer(event)" style="display:none"></label>
 </div>
-<div id="vide">Aucune sortie enregistrée. Les zones colorées apparaissent autour des sorties : appuie sur « Ma position », puis sur « Noter une sortie ici ».</div>
 <div id="map"></div>
 <div id="panel"></div>
 
 <script>
 const KEY = 'cueillette_sorties';
-const DEMI_VIE = 21;   // jours : une sortie perd la moitié de son poids après ce délai
-const RAYON = 300;     // mètres : portée d'une sortie autour de son point
-const PRIOR = 0.3;     // probabilité de base avant toute donnée locale
-const PRIOR_POIDS = 1; // poids de cette base par rapport aux sorties réelles
-const CELLULE = 50;    // mètres : taille des cases colorées
+const RAYON = 300;        // m : portée d'une sortie autour de son point
+const DEMI_VIE = 365;     // jours : une sortie garde la moitié de son poids après 1 an
+const PRIOR_POIDS = 1;    // poids de l'habitat face aux sorties
+const H_FORET = 0.5;      // potentiel de base d'une forêt
+const H_HORS = 0.04;      // potentiel de base hors forêt
+const PLUIE_OPTI = 40;    // mm de pluie sur environ 12 jours pour un indice pluie maximal
+const ZOOM_MIN = 13;      // zoom minimal pour calculer la heatmap
+const COLONNES = 120;     // résolution horizontale de la heatmap
+const P_MAX = 0.6;        // potentiel affiché en rouge
+const SEUIL = 0.1;        // en dessous, rien n'est affiché
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+const RAMPE = [[0, [40, 90, 255]], [0.35, [0, 190, 120]], [0.65, [255, 215, 0]], [1, [230, 30, 30]]];
 
 let sorties = JSON.parse(localStorage.getItem(KEY) || '[]');
 let tempMarker = null;
+let polys = [];
+let foretsZone = null;
+let foretErreur = false;
+let meteoActuelle = null;
+let cacheMeteo = {};
+let jeton = 0;
+let minuterie = null;
 
 const map = L.map('map', { zoomControl: false }).setView([46.6, 2.5], 6);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
-  attribution: '© OpenStreetMap'
+  attribution: '© OpenStreetMap | Météo Open-Meteo'
 }).addTo(map);
 
 const forets = L.tileLayer.wms('https://data.geopf.fr/wms-r/wms', {
@@ -70,29 +85,33 @@ const forets = L.tileLayer.wms('https://data.geopf.fr/wms-r/wms', {
   attribution: '© IGN BD Forêt'
 });
 
-const rendu = L.canvas({ padding: 0.5 });
-const zones = L.layerGroup().addTo(map);
+const chaleur = L.layerGroup().addTo(map);
 const couche = L.layerGroup().addTo(map);
 
 L.control.layers(null, {
-  'Zones de probabilité': zones,
+  'Heatmap': chaleur,
   'Forêts (IGN)': forets
 }, { position: 'topright', collapsed: true }).addTo(map);
 
 const legende = L.control({ position: 'bottomleft' });
 legende.onAdd = () => {
   const d = L.DomUtil.create('div', 'legende');
-  d.innerHTML = '<b>Probabilité</b><div class="grad"></div><div class="ext"><span>Faible</span><span>Forte</span></div>';
+  d.innerHTML = '<b>Potentiel</b><div class="grad"></div><div class="ext"><span>Faible</span><span>Fort</span></div><div id="info" class="muted"></div>';
+  L.DomEvent.disableClickPropagation(d);
   return d;
 };
 legende.addTo(map);
 
 const panel = document.getElementById('panel');
-const vide = document.getElementById('vide');
 
 const esc = t => String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function save() { localStorage.setItem(KEY, JSON.stringify(sorties)); }
+
+function info(html) {
+  const el = document.getElementById('info');
+  if (el) el.innerHTML = html;
+}
 
 function distance(lat1, lng1, lat2, lng2) {
   const R = 6371000, rad = x => x * Math.PI / 180;
@@ -101,70 +120,305 @@ function distance(lat1, lng1, lat2, lng2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-function score(lat, lng) {
+/* ---------- Météo ---------- */
+
+function facteurTemp(t) {
+  if (t <= 4 || t >= 26) return 0;
+  if (t < 10) return (t - 4) / 6;
+  if (t <= 20) return 1;
+  return (26 - t) / 6;
+}
+
+function indiceMeteo(d) {
+  const n = d.time.length;
+  const ok = x => x != null;
+  // Pluie de J-14 à J-2 : les champignons sortent quelques jours après la pluie
+  const pluie = d.precipitation_sum.slice(0, Math.max(0, n - 2)).filter(ok).reduce((a, b) => a + b, 0);
+  const tm = [];
+  for (let i = Math.max(0, n - 10); i < n; i++) {
+    if (ok(d.temperature_2m_max[i]) && ok(d.temperature_2m_min[i])) {
+      tm.push((d.temperature_2m_max[i] + d.temperature_2m_min[i]) / 2);
+    }
+  }
+  const tmoy = tm.length ? tm.reduce((a, b) => a + b, 0) / tm.length : null;
+  const mins = d.temperature_2m_min.slice(Math.max(0, n - 5)).filter(ok);
+  const tmin = mins.length ? Math.min(...mins) : null;
+  const fP = Math.min(1, pluie / PLUIE_OPTI);
+  const fT = tmoy == null ? 0.5 : facteurTemp(tmoy);
+  const fG = tmin != null && tmin < -1 ? 0.4 : 1;
+  return {
+    pluie: Math.round(pluie),
+    tmoy: tmoy == null ? null : Math.round(tmoy * 10) / 10,
+    indice: fP * fT * fG
+  };
+}
+
+async function meteo(lat, lng, date) {
+  const fmt = d => d.toISOString().slice(0, 10);
+  const la = lat.toFixed(2), lo = lng.toFixed(2);
+  const fin = new Date(date);
+  const debut = new Date(fin.getTime() - 14 * 86400000);
+  const cle = `${la},${lo},${fmt(fin)}`;
+  const c = cacheMeteo[cle];
+  if (c && Date.now() - c.t < 2 * 3600000) return c.v;
+  const params = `?latitude=${la}&longitude=${lo}&start_date=${fmt(debut)}&end_date=${fmt(fin)}` +
+                 '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min&timezone=auto';
+  for (const base of ['https://api.open-meteo.com/v1/forecast', 'https://archive-api.open-meteo.com/v1/archive']) {
+    try {
+      const j = await (await fetch(base + params)).json();
+      if (!j.daily || !j.daily.time) continue;
+      const v = indiceMeteo(j.daily);
+      cacheMeteo[cle] = { t: Date.now(), v };
+      return v;
+    } catch (e) {}
+  }
+  return null;
+}
+
+function facteurMeteo() {
+  const m = meteoActuelle ? meteoActuelle.indice : 0.5;
+  return 0.2 + 0.8 * m;
+}
+
+/* ---------- Forêts (OpenStreetMap via Overpass) ---------- */
+
+async function overpass(q) {
+  for (const url of OVERPASS) {
+    try {
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'data=' + encodeURIComponent(q)
+      });
+      if (r.ok) return await r.json();
+    } catch (e) {}
+  }
+  throw new Error('Overpass indisponible');
+}
+
+async function chargerForets(vue) {
+  const c = vue.getCenter();
+  const zone = vue.pad(0.25).extend(L.latLngBounds([c.lat - 0.04, c.lng - 0.06], [c.lat + 0.04, c.lng + 0.06]));
+  const bb = [zone.getSouth(), zone.getWest(), zone.getNorth(), zone.getEast()].map(x => x.toFixed(5)).join(',');
+  const q = `[out:json][timeout:25];(way["landuse"="forest"](${bb});way["natural"="wood"](${bb});` +
+            `relation["landuse"="forest"](${bb});relation["natural"="wood"](${bb}););out geom;`;
+  const data = await overpass(q);
+  const liste = [];
+  for (const el of data.elements || []) {
+    let rings = [];
+    if (el.type === 'way' && el.geometry) {
+      const g = el.geometry.filter(Boolean);
+      if (g.length > 2 && (g[0].lat !== g[g.length - 1].lat || g[0].lon !== g[g.length - 1].lon)) g.push(g[0]);
+      rings = [g];
+    } else if (el.type === 'relation' && el.members) {
+      rings = el.members.filter(m => m.type === 'way' && m.geometry).map(m => m.geometry.filter(Boolean));
+    }
+    rings = rings.filter(r => r.length > 1);
+    if (!rings.length) continue;
+    const b = [90, 180, -90, -180];
+    for (const r of rings) for (const p of r) {
+      if (p.lat < b[0]) b[0] = p.lat;
+      if (p.lon < b[1]) b[1] = p.lon;
+      if (p.lat > b[2]) b[2] = p.lat;
+      if (p.lon > b[3]) b[3] = p.lon;
+    }
+    const lt = el.tags && el.tags.leaf_type;
+    const f = lt === 'needleleaved' ? 0.85 : (lt === 'broadleaved' || lt === 'mixed') ? 1 : 0.9;
+    liste.push({ rings, b, f });
+  }
+  return { polys: liste, zone };
+}
+
+function foretEn(lat, lng) {
+  let f = 0;
+  for (const poly of polys) {
+    if (lat < poly.b[0] || lat > poly.b[2] || lng < poly.b[1] || lng > poly.b[3]) continue;
+    let dedans = false;
+    for (const ring of poly.rings) {
+      for (let i = 0; i < ring.length - 1; i++) {
+        const a = ring[i], b = ring[i + 1];
+        if ((a.lat > lat) !== (b.lat > lat) &&
+            lng < a.lon + (lat - a.lat) * (b.lon - a.lon) / (b.lat - a.lat)) dedans = !dedans;
+      }
+    }
+    if (dedans && poly.f > f) f = poly.f;
+  }
+  return f;
+}
+
+/* ---------- Sorties ---------- */
+
+function poidsSortie(s, now) {
+  const age = Math.max(0, (now - new Date(s.date).getTime()) / 86400000);
+  let fiab = 1;
+  if (!s.found) {
+    // Une sortie sans résultat par temps défavorable compte peu
+    if (s.indice != null) fiab = s.indice;
+    else if (s.pluie != null) fiab = Math.min(1, s.pluie / PLUIE_OPTI);
+    else fiab = 0.5;
+    fiab = Math.max(0.1, fiab);
+  }
+  return Math.pow(0.5, age / DEMI_VIE) * fiab;
+}
+
+function probaPoint(lat, lng) {
+  const f = foretEn(lat, lng);
+  const h = f > 0 ? H_FORET * f : H_HORS;
   const now = Date.now();
-  let num = PRIOR * PRIOR_POIDS, den = PRIOR_POIDS, n = 0, poids = 0;
+  let sw = 0, swy = 0, n = 0;
   for (const s of sorties) {
     const d = distance(lat, lng, s.lat, s.lng);
     if (d > RAYON) continue;
-    const age = Math.max(0, (now - new Date(s.date).getTime()) / 86400000);
-    const w = Math.pow(0.5, age / DEMI_VIE) * (1 - d / RAYON);
-    num += w * (s.found ? 1 : 0);
-    den += w;
-    poids += w;
+    const w = poidsSortie(s, now) * (1 - d / RAYON);
+    sw += w;
+    swy += w * (s.found ? 1 : 0);
     n++;
   }
-  return { p: num / den, n, poids };
+  const q = (h * PRIOR_POIDS + swy) / (PRIOR_POIDS + sw);
+  return { p: q * facteurMeteo(), f, n, m: meteoActuelle ? meteoActuelle.indice : null };
 }
 
-function couleur(p) {
-  const teinte = Math.round(Math.max(0, Math.min(1, p)) * 120);
-  return `hsl(${teinte}, 80%, ${teinte > 90 ? 32 : 42}%)`;
+/* ---------- Heatmap ---------- */
+
+function rampe(t) {
+  for (let i = 1; i < RAMPE.length; i++) {
+    if (t <= RAMPE[i][0]) {
+      const [t0, c0] = RAMPE[i - 1], [t1, c1] = RAMPE[i];
+      const k = (t - t0) / (t1 - t0);
+      return c0.map((v, j) => Math.round(v + (c1[j] - v) * k));
+    }
+  }
+  return RAMPE[RAMPE.length - 1][1];
 }
 
-function dessinerZones() {
-  zones.clearLayers();
-  if (!sorties.length) return;
-  const dLat = CELLULE / 111320;
-  const dLng = CELLULE / (111320 * Math.cos(46.5 * Math.PI / 180));
-  const pas = Math.ceil(RAYON / CELLULE);
-  const vues = new Set();
-  for (const s of sorties) {
-    const i0 = Math.floor(s.lat / dLat), j0 = Math.floor(s.lng / dLng);
-    for (let i = i0 - pas; i <= i0 + pas; i++) {
-      for (let j = j0 - pas; j <= j0 + pas; j++) {
-        const k = i + ':' + j;
-        if (vues.has(k)) continue;
-        vues.add(k);
-        const { p, poids } = score((i + 0.5) * dLat, (j + 0.5) * dLng);
-        if (poids < 0.05) continue;
-        L.rectangle([[i * dLat, j * dLng], [(i + 1) * dLat, (j + 1) * dLng]], {
-          renderer: rendu,
-          stroke: false,
-          fillColor: couleur(p),
-          fillOpacity: Math.min(0.55, 0.1 + 0.45 * poids),
-          interactive: false
-        }).addTo(zones);
+function dessinerHeatmap() {
+  chaleur.clearLayers();
+  const v = map.getBounds();
+  const S = v.getSouth(), N = v.getNorth(), W = v.getWest(), E = v.getEast();
+  const cosc = Math.cos(((S + N) / 2) * Math.PI / 180);
+  const cols = COLONNES;
+  const dLng = (E - W) / cols;
+  const dLat = dLng * cosc;
+  const rows = Math.ceil((N - S) / dLat);
+  const nb = rows * cols;
+
+  // Masque forêt par balayage ligne par ligne
+  const masque = new Float32Array(nb);
+  for (let r = 0; r < rows; r++) {
+    const lat = S + (r + 0.5) * dLat;
+    for (const poly of polys) {
+      if (lat < poly.b[0] || lat > poly.b[2] || poly.b[3] < W || poly.b[1] > E) continue;
+      const xs = [];
+      for (const ring of poly.rings) {
+        for (let i = 0; i < ring.length - 1; i++) {
+          const a = ring[i], b = ring[i + 1];
+          if ((a.lat > lat) !== (b.lat > lat)) xs.push(a.lon + (lat - a.lat) * (b.lon - a.lon) / (b.lat - a.lat));
+        }
+      }
+      if (xs.length < 2) continue;
+      xs.sort((x, y) => x - y);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const c0 = Math.max(0, Math.ceil((xs[k] - W) / dLng - 0.5));
+        const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - W) / dLng - 0.5));
+        for (let c = c0; c <= c1; c++) {
+          if (masque[r * cols + c] < poly.f) masque[r * cols + c] = poly.f;
+        }
       }
     }
   }
+
+  // Influence des sorties
+  const sw = new Float32Array(nb), swy = new Float32Array(nb);
+  const mLat = 111320, mLng = 111320 * cosc, now = Date.now();
+  const nr = Math.ceil(RAYON / (dLat * mLat)), nc = Math.ceil(RAYON / (dLng * mLng));
+  for (const s of sorties) {
+    const w0 = poidsSortie(s, now);
+    if (w0 < 0.01) continue;
+    const r0 = Math.floor((s.lat - S) / dLat), c0 = Math.floor((s.lng - W) / dLng);
+    for (let r = Math.max(0, r0 - nr); r <= Math.min(rows - 1, r0 + nr); r++) {
+      for (let c = Math.max(0, c0 - nc); c <= Math.min(cols - 1, c0 + nc); c++) {
+        const dy = (S + (r + 0.5) * dLat - s.lat) * mLat;
+        const dx = (W + (c + 0.5) * dLng - s.lng) * mLng;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > RAYON) continue;
+        const w = w0 * (1 - d / RAYON);
+        sw[r * cols + c] += w;
+        swy[r * cols + c] += w * (s.found ? 1 : 0);
+      }
+    }
+  }
+
+  // Image de la heatmap
+  const fM = facteurMeteo();
+  const cv = document.createElement('canvas');
+  cv.width = cols;
+  cv.height = rows;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(cols, rows);
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      const h = masque[i] > 0 ? H_FORET * masque[i] : H_HORS;
+      const q = (h * PRIOR_POIDS + swy[i]) / (PRIOR_POIDS + sw[i]);
+      const t = Math.min(1, q * fM / P_MAX);
+      if (t < SEUIL) continue;
+      const [R, G, B] = rampe(t);
+      const o = ((rows - 1 - r) * cols + c) * 4;
+      img.data[o] = R;
+      img.data[o + 1] = G;
+      img.data[o + 2] = B;
+      img.data[o + 3] = Math.round(90 + 140 * t);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  L.imageOverlay(cv.toDataURL(), [[S, W], [S + rows * dLat, E]], {
+    opacity: 0.75,
+    interactive: false,
+    className: 'chaleur'
+  }).addTo(chaleur);
 }
 
-async function pluie10j(lat, lng) {
-  // Archive Open-Meteo : fenêtre de 10 jours se terminant il y a 2 jours
-  const fmt = d => d.toISOString().slice(0, 10);
-  const fin = new Date(Date.now() - 2 * 86400000);
-  const debut = new Date(fin.getTime() - 10 * 86400000);
-  try {
-    const url = `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}` +
-                `&start_date=${fmt(debut)}&end_date=${fmt(fin)}&daily=precipitation_sum&timezone=auto`;
-    const r = await fetch(url);
-    const j = await r.json();
-    return Math.round(j.daily.precipitation_sum.reduce((a, b) => a + (b || 0), 0) * 10) / 10;
-  } catch (e) {
-    return null;
-  }
+function texteMeteo() {
+  let t = meteoActuelle
+    ? `Météo (centre) : ${meteoActuelle.pluie} mm en 2 sem., ${meteoActuelle.tmoy ?? '?'} °C, indice ${Math.round(meteoActuelle.indice * 100)} %`
+    : 'Météo indisponible, indice moyen utilisé';
+  if (foretErreur) t += '<br>Forêts indisponibles, réessaie avec « Actualiser »';
+  if (!sorties.length) t += '<br>Aucune sortie enregistrée';
+  return t;
 }
+
+async function actualiser(force) {
+  const mon = ++jeton;
+  if (force) { cacheMeteo = {}; foretsZone = null; }
+  if (map.getZoom() < ZOOM_MIN) {
+    chaleur.clearLayers();
+    info('Zoome sur une zone pour afficher la heatmap.' + (sorties.length ? '' : '<br>Aucune sortie enregistrée'));
+    return;
+  }
+  const vue = map.getBounds();
+  if (!foretsZone || !foretsZone.contains(vue)) {
+    info('Chargement des forêts…');
+    try {
+      const res = await chargerForets(vue);
+      if (mon !== jeton) return;
+      polys = res.polys;
+      foretsZone = res.zone;
+      foretErreur = false;
+    } catch (e) {
+      if (mon !== jeton) return;
+      foretErreur = true;
+    }
+  }
+  info('Chargement de la météo…');
+  const c = vue.getCenter();
+  const m = await meteo(c.lat, c.lng, new Date());
+  if (mon !== jeton) return;
+  meteoActuelle = m;
+  dessinerHeatmap();
+  info(texteMeteo());
+}
+
+/* ---------- Interface ---------- */
 
 function render() {
   couche.clearLayers();
@@ -177,8 +431,10 @@ function render() {
       fillOpacity: 0.9
     }).bindPopup(popupHtml(s)).addTo(couche);
   });
-  dessinerZones();
-  vide.style.display = sorties.length ? 'none' : 'block';
+  if (map.getZoom() >= ZOOM_MIN && (foretsZone || foretErreur)) {
+    dessinerHeatmap();
+    info(texteMeteo());
+  }
 }
 
 function popupHtml(s) {
@@ -186,7 +442,8 @@ function popupHtml(s) {
   let h = `<b>${d}</b><br>${s.found ? 'Trouvé' : 'Rien trouvé'}`;
   if (s.qty) h += `<br>${esc(s.qty)}`;
   if (s.note) h += `<br><i>${esc(s.note)}</i>`;
-  if (s.pluie != null) h += `<br>Pluie 10 j : ${s.pluie} mm`;
+  if (s.pluie != null) h += `<br>Pluie : ${s.pluie} mm`;
+  if (s.indice != null) h += `<br>Indice météo : ${Math.round(s.indice * 100)} %`;
   h += `<br><button class="sec" onclick="supprimer(${s.id})">Supprimer</button>`;
   return h;
 }
@@ -205,14 +462,16 @@ function closePanel() {
 }
 
 function showSpot(lat, lng) {
-  const { p, n } = score(lat, lng);
+  const r = probaPoint(lat, lng);
   if (tempMarker) map.removeLayer(tempMarker);
   tempMarker = L.marker([lat, lng]).addTo(map);
-  const resultat = n === 0
-    ? '<h3>Aucune sortie à proximité</h3><p class="muted">Pas de donnée locale pour ce point.</p>'
-    : `<h3>Probabilité estimée : ${Math.round(p * 100)} %</h3><p class="muted">${n} sortie(s) dans un rayon de ${RAYON} m</p>`;
+  const habitat = !foretsZone || !foretsZone.contains([lat, lng])
+    ? 'non chargé (zoome sur la zone)'
+    : (r.f > 0 ? 'forêt' : 'hors forêt');
+  const met = r.m == null ? 'indisponible' : Math.round(r.m * 100) + ' %';
   openPanel(`
-    ${resultat}
+    <h3>Potentiel estimé : ${Math.round(r.p * 100)} %</h3>
+    <p class="muted">Habitat : ${habitat}<br>Indice météo : ${met}<br>Sorties à moins de ${RAYON} m : ${r.n}</p>
     <p class="muted">Estimation indicative, pas une garantie. Ne jamais utiliser cette carte pour identifier une espèce.</p>
     <button onclick="openForm(${lat}, ${lng})">Noter une sortie ici</button>
     <button class="sec" onclick="closePanel()">Fermer</button>
@@ -236,23 +495,26 @@ function openForm(lat, lng) {
 
 async function saveSortie(lat, lng) {
   const dateVal = document.getElementById('f-date').value;
-  const s = {
+  const found = document.getElementById('f-found').value === '1';
+  const qty = document.getElementById('f-qty').value.trim();
+  const note = document.getElementById('f-note').value.trim();
+  const date = dateVal ? new Date(dateVal) : new Date();
+  const mt = await meteo(lat, lng, date);
+  sorties.push({
     id: Date.now(),
     lat, lng,
-    date: dateVal ? new Date(dateVal).toISOString() : new Date().toISOString(),
-    found: document.getElementById('f-found').value === '1',
-    qty: document.getElementById('f-qty').value.trim(),
-    note: document.getElementById('f-note').value.trim(),
-    pluie: await pluie10j(lat, lng)
-  };
-  sorties.push(s);
+    date: date.toISOString(),
+    found, qty, note,
+    pluie: mt ? mt.pluie : null,
+    indice: mt ? Math.round(mt.indice * 100) / 100 : null
+  });
   save(); render(); closePanel();
 }
 
 function locate() {
   navigator.geolocation.getCurrentPosition(pos => {
     const { latitude: lat, longitude: lng } = pos.coords;
-    map.setView([lat, lng], 16);
+    map.setView([lat, lng], 15);
     showSpot(lat, lng);
   }, () => alert('Position indisponible. Vérifie l\'autorisation de localisation.'),
   { enableHighAccuracy: true, timeout: 10000 });
@@ -284,7 +546,18 @@ function importer(e) {
 }
 
 map.on('click', e => showSpot(e.latlng.lat, e.latlng.lng));
+map.on('moveend', () => {
+  clearTimeout(minuterie);
+  minuterie = setTimeout(() => actualiser(false), 600);
+});
+
 render();
+if (sorties.length) {
+  const s = sorties[sorties.length - 1];
+  map.setView([s.lat, s.lng], 14);
+} else {
+  actualiser(false);
+}
 </script>
 </body>
 </html>
