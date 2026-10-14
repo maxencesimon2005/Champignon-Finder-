@@ -14,14 +14,18 @@ html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
 #map { position: absolute; top: 0; bottom: 0; left: 0; right: 0; }
 #bar { position: absolute; top: 10px; left: 10px; right: 64px; z-index: 1000; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 #bar .logo { width: 36px; height: 36px; background: #fff; border-radius: 50%; padding: 4px; box-sizing: border-box; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-button, .btn { background: #2d5a27; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; font-size: 15px; cursor: pointer; }
+button, .btn { background: #2d5a27; color: #fff; border: 0; border-radius: 8px; padding: 10px 12px; font-size: 15px; cursor: pointer; display: inline-block; }
 button.sec { background: #888; }
-#bar .btn { background: #fff; color: #2d5a27; box-shadow: 0 1px 4px rgba(0,0,0,.3); }
-#panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 65%; overflow: auto; background: #fff; border-radius: 16px 16px 0 0; padding: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,.2); display: none; z-index: 2000; }
+#espece { padding: 9px 8px; font-size: 15px; border: 0; border-radius: 8px; background: #fff; color: #2d5a27; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 46vw; }
+#panel { position: fixed; left: 0; right: 0; bottom: 0; max-height: 70%; overflow: auto; background: #fff; border-radius: 16px 16px 0 0; padding: 16px; box-shadow: 0 -2px 10px rgba(0,0,0,.2); display: none; z-index: 2000; }
 #panel label { display: block; margin: 10px 0; font-size: 14px; }
+#panel label.btn { display: inline-block; margin: 10px 6px 0 0; font-size: 15px; }
 #panel input, #panel select, #panel textarea { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 8px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }
 #panel button { margin: 10px 6px 0 0; }
 .muted { color: #666; font-size: 13px; }
+.esp { margin: 8px 0; font-size: 14px; }
+.esp .conf { color: #b5402a; font-size: 12px; }
+.alerte { background: #fdecea; color: #8a1c12; border-radius: 8px; padding: 8px; font-size: 13px; }
 .legende { background: #fff; padding: 6px 8px; border-radius: 8px; font-size: 12px; color: #333; box-shadow: 0 1px 4px rgba(0,0,0,.3); max-width: 230px; }
 .legende .grad { width: 150px; height: 10px; border-radius: 4px; margin: 4px 0; background: linear-gradient(to right, rgb(255,235,100), rgb(255,140,0), rgb(200,0,0)); }
 .legende .ext { display: flex; justify-content: space-between; width: 150px; }
@@ -38,66 +42,130 @@ button.sec { background: #888; }
     <circle cx="38" cy="14" r="3" fill="white"/>
     <rect x="25" y="30" width="14" height="24" rx="5" fill="#f2e6d0"/>
   </svg>
+  <select id="espece" onchange="changerEspece()"></select>
   <button onclick="locate()">Ma position</button>
-  <button onclick="actualiser(true)">Actualiser</button>
-  <button onclick="exporter()">Exporter</button>
-  <label class="btn">Importer<input type="file" accept="application/json" onchange="importer(event)" style="display:none"></label>
+  <button class="sec" onclick="menu()">Menu</button>
 </div>
 <div id="map"></div>
 <div id="panel"></div>
 
 <script>
-const VERSION = 'v5';
+const VERSION = 'v6';
 const KEY = 'cueillette_sorties';
-const RAYON = 300;        // m : portée d'une sortie autour de son point
-const DEMI_VIE = 365;     // jours : une sortie garde la moitié de son poids après 1 an
-const AJUST_MAX = 0.4;    // influence maximale des sorties : plus ou moins 40 %
-const HAB_HORS = 0.6;     // facteur appliqué hors forêt
-const HAB_INCONNU = 0.8;  // facteur tant que les forêts ne sont pas chargées
-const PLUIE_OPTI = 40;    // mm de pluie sur environ 12 jours pour un indice pluie maximal
-const ZOOM_MIN = 13;      // zoom minimal pour calculer la heatmap
-const COLONNES = 160;     // résolution horizontale de la heatmap
-const OPACITE = 0.85;     // opacité générale de la heatmap
-const GM_COLS = 6;        // grille de points météo : colonnes
-const GM_ROWS = 8;        // grille de points météo : lignes
+const KEY_ESP = 'cueillette_espece';
+const RAYON = 300;          // m : portée d'une sortie autour de son point
+const DEMI_VIE = 365;       // jours : une sortie garde la moitié de son poids après 1 an
+const AJUST_MAX = 0.4;      // influence maximale des sorties : plus ou moins 40 %
+const P_PLAFOND = 0.85;     // probabilité maximale sans sortie (affichée en rouge)
+const ZOOM_MIN = 13;        // zoom minimal pour calculer la heatmap
+const COLONNES = 200;       // résolution horizontale de la heatmap
+const OPACITE = 0.85;       // opacité générale de la heatmap
+const GM_COLS = 8;          // grille météo : colonnes
+const GM_ROWS = 10;         // grille météo : lignes
+const GE_COLS = 15;         // grille d'altitude : colonnes
+const GE_ROWS = 20;         // grille d'altitude : lignes
+const GRADIENT_T = 0.0065;  // °C perdus par mètre d'altitude
 const OVERPASS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
 ];
 const RAMPE = [[0, [255, 235, 100]], [0.5, [255, 140, 0]], [1, [200, 0, 0]]];
+const DEFAUT_ENV = { t: 12, tmin: 5, pluie: 20, alt: null };
+
+const HABITATS = ['ouvert', 'foret', 'chene', 'hetre', 'chataignier', 'feuillus', 'pin', 'sapin', 'coniferes', 'mixte', 'peupleraie', 'lande'];
+const H = Object.fromEntries(HABITATS.map((h, i) => [h, i]));
+const INCONNU = 255;
+const NOMS_HAB = {
+  ouvert: 'milieu ouvert (prairie, culture, bâti)', foret: 'forêt (essence inconnue)', chene: 'chênaie',
+  hetre: 'hêtraie', chataignier: 'châtaigneraie', feuillus: 'feuillus mélangés', pin: 'pinède',
+  sapin: 'sapins, épicéas ou douglas', coniferes: 'conifères mélangés', mixte: 'mélange feuillus et conifères',
+  peupleraie: 'peupleraie', lande: 'lande'
+};
+
+// Profils des espèces : habitats (0 à 1), saison par mois (janvier à décembre),
+// température moyenne [nulle, optimale, optimale, nulle], pluie utile en mm, tolérance au gel
+const ESPECES = [
+  { id: 'cepe', nom: 'Cèpe de Bordeaux', latin: 'Boletus edulis',
+    hab: { chene: 0.9, hetre: 1, chataignier: 0.9, feuillus: 0.7, sapin: 0.9, pin: 0.6, coniferes: 0.7, mixte: 0.9, foret: 0.7 },
+    mois: [0, 0, 0, 0, 0.1, 0.3, 0.5, 0.8, 1, 1, 0.6, 0.1], temp: [8, 12, 18, 23], pluie: 40, gel: 0.3,
+    conf: "bolet amer (pores rosés), bolet de Satan (toxique)" },
+  { id: 'bronze', nom: 'Cèpe bronzé', latin: 'Boletus aereus',
+    hab: { chene: 1, chataignier: 1, hetre: 0.5, feuillus: 0.6, mixte: 0.5, foret: 0.4 },
+    mois: [0, 0, 0, 0, 0, 0.3, 0.7, 0.9, 1, 0.7, 0.2, 0], temp: [12, 16, 22, 27], pluie: 35, gel: 0.3,
+    conf: "bolet amer (pores rosés), bolet de Satan (toxique)" },
+  { id: 'ete', nom: "Cèpe d'été", latin: 'Boletus reticulatus',
+    hab: { chene: 1, hetre: 0.9, chataignier: 0.9, feuillus: 0.7, mixte: 0.5, foret: 0.5 },
+    mois: [0, 0, 0, 0, 0.3, 0.8, 1, 0.9, 0.6, 0.2, 0, 0], temp: [13, 17, 23, 28], pluie: 30, gel: 0.3,
+    conf: "bolet amer (pores rosés), bolet de Satan (toxique)" },
+  { id: 'girolle', nom: 'Girolle', latin: 'Cantharellus cibarius',
+    hab: { chene: 1, hetre: 1, chataignier: 0.9, feuillus: 0.8, sapin: 0.8, pin: 0.6, coniferes: 0.7, mixte: 0.9, foret: 0.7 },
+    mois: [0, 0, 0, 0, 0.1, 0.6, 0.9, 1, 0.9, 0.7, 0.3, 0], temp: [10, 14, 21, 26], pluie: 45, gel: 0.3,
+    conf: "clitocybe de l'olivier (toxique), fausse girolle" },
+  { id: 'trompette', nom: 'Trompette de la mort', latin: 'Craterellus cornucopioides',
+    hab: { hetre: 1, chene: 0.9, chataignier: 0.7, feuillus: 0.7, mixte: 0.6, foret: 0.5 },
+    mois: [0, 0, 0, 0, 0, 0, 0.2, 0.6, 1, 1, 0.7, 0.2], temp: [6, 10, 17, 22], pluie: 45, gel: 0.4, conf: '' },
+  { id: 'pied-mouton', nom: 'Pied de mouton', latin: 'Hydnum repandum',
+    hab: { hetre: 0.9, chene: 0.9, chataignier: 0.8, feuillus: 0.8, sapin: 0.8, pin: 0.6, coniferes: 0.7, mixte: 0.9, foret: 0.7 },
+    mois: [0.1, 0, 0, 0, 0, 0, 0.1, 0.4, 0.8, 1, 1, 0.6], temp: [3, 7, 15, 20], pluie: 35, gel: 0.8, conf: '' },
+  { id: 'tube', nom: 'Chanterelle en tube', latin: 'Craterellus tubaeformis',
+    hab: { sapin: 1, coniferes: 0.9, pin: 0.6, mixte: 0.7, hetre: 0.5, feuillus: 0.3, foret: 0.5 },
+    mois: [0.2, 0, 0, 0, 0, 0, 0, 0.2, 0.6, 1, 1, 0.7], temp: [2, 6, 13, 18], pluie: 40, gel: 0.8,
+    conf: "cortinaires orangés (mortels)" },
+  { id: 'lactaire', nom: 'Lactaire délicieux', latin: 'Lactarius deliciosus',
+    hab: { pin: 1, coniferes: 0.6, mixte: 0.4, foret: 0.3 },
+    mois: [0, 0, 0, 0, 0, 0, 0.1, 0.4, 0.9, 1, 0.7, 0.2], temp: [7, 11, 18, 22], pluie: 35, gel: 0.4,
+    conf: "lactaire à toison (toxique)" },
+  { id: 'coulemelle', nom: 'Coulemelle', latin: 'Macrolepiota procera',
+    hab: { ouvert: 0.6, lande: 0.8, chene: 0.5, chataignier: 0.5, feuillus: 0.5, pin: 0.4, mixte: 0.4, peupleraie: 0.3, foret: 0.5 },
+    mois: [0, 0, 0, 0, 0, 0.3, 0.7, 1, 1, 0.7, 0.2, 0], temp: [11, 15, 22, 27], pluie: 30, gel: 0.3,
+    conf: "petites lépiotes (mortelles), amanite panthère (toxique)" },
+  { id: 'rose', nom: 'Rosé des prés', latin: 'Agaricus campestris',
+    hab: { ouvert: 0.7, lande: 0.4 },
+    mois: [0, 0, 0, 0, 0.1, 0.3, 0.6, 0.9, 1, 0.8, 0.3, 0], temp: [10, 14, 21, 26], pluie: 30, gel: 0.3,
+    conf: "amanites blanches (mortelles), agaric jaunissant (toxique)" },
+  { id: 'mousseron', nom: 'Mousseron de la Saint-Georges', latin: 'Calocybe gambosa',
+    hab: { ouvert: 0.6, lande: 0.5, feuillus: 0.3, foret: 0.2 },
+    mois: [0, 0, 0.2, 0.9, 1, 0.3, 0, 0, 0, 0, 0, 0], temp: [6, 9, 15, 19], pluie: 30, gel: 0.5,
+    conf: "inocybe de Patouillard (mortel), entolome livide (toxique)" },
+  { id: 'morille', nom: 'Morille', latin: 'Morchella sp.',
+    hab: { peupleraie: 0.8, feuillus: 0.6, chene: 0.4, chataignier: 0.3, foret: 0.4, ouvert: 0.3 },
+    mois: [0, 0, 0.6, 1, 0.7, 0.1, 0, 0, 0, 0, 0, 0], temp: [6, 9, 15, 19], pluie: 25, gel: 0.5,
+    conf: "gyromitre (mortel)" }
+];
 
 let sorties = JSON.parse(localStorage.getItem(KEY) || '[]');
+let especeSel = localStorage.getItem(KEY_ESP) || 'toutes';
 let tempMarker = null;
 let polys = [];
-let foretsZone = null;
-let foretErreur = '';
-let chargementForets = null;
-let grilleMeteo = null;
-let meteoErreur = '';
-let chargementMeteo = null;
+let habZone = null;
+let habSource = '';
+let habErreur = '';
+let chargementHab = null;
+let env = null;
+let envErreur = '';
+let chargementEnv = null;
 let cacheMeteo = {};
 let minuterie = null;
 
+/* ---------- Carte ---------- */
+
 const map = L.map('map', { zoomControl: false }).setView([46.6, 2.5], 6);
-const attribution = '© OpenStreetMap | Météo Open-Meteo';
+const attribution = '© OpenStreetMap | Météo Open-Meteo | IGN';
 const fondGris = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution, className: 'fond-gris'
 }).addTo(map);
 const fondCouleur = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution
 });
-
 const forets = L.tileLayer.wms('https://data.geopf.fr/wms-r/wms', {
   layers: 'LANDCOVER.FORESTINVENTORY.V2',
   format: 'image/png',
   transparent: true,
   version: '1.3.0',
-  opacity: 0.5,
-  attribution: '© IGN BD Forêt'
+  opacity: 0.5
 });
 
-// Calque dédié à la heatmap, au-dessus du fond de carte et sous les marqueurs
 map.createPane('chaleur');
 map.getPane('chaleur').style.zIndex = 450;
 map.getPane('chaleur').style.pointerEvents = 'none';
@@ -116,7 +184,7 @@ L.control.layers({
 const legende = L.control({ position: 'bottomleft' });
 legende.onAdd = () => {
   const d = L.DomUtil.create('div', 'legende');
-  d.innerHTML = `<b>Probabilité</b><span class="version">${VERSION}</span><div class="grad"></div>` +
+  d.innerHTML = `<b id="leg-titre">Probabilité</b><span class="version">${VERSION}</span><div class="grad"></div>` +
                 '<div class="ext"><span>Faible</span><span>Élevée</span></div><div id="info" class="muted"></div>';
   L.DomEvent.disableClickPropagation(d);
   return d;
@@ -124,15 +192,28 @@ legende.onAdd = () => {
 legende.addTo(map);
 
 const panel = document.getElementById('panel');
+const sel = document.getElementById('espece');
+sel.innerHTML = '<option value="toutes">Toutes espèces</option>' +
+  ESPECES.map(e => `<option value="${e.id}">${e.nom}</option>`).join('');
+if (!ESPECES.some(e => e.id === especeSel)) especeSel = 'toutes';
+sel.value = especeSel;
+
+/* ---------- Outils ---------- */
 
 const esc = t => String(t).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const f1 = x => x.toFixed(1).replace('.', ',');
 
 function save() { localStorage.setItem(KEY, JSON.stringify(sorties)); }
 
 function info(html) {
   const el = document.getElementById('info');
   if (el) el.innerHTML = html;
+}
+
+function majLegende() {
+  const e = ESPECES.find(x => x.id === especeSel);
+  document.getElementById('leg-titre').textContent = e ? e.nom : 'Probabilité, toutes espèces';
 }
 
 function distance(lat1, lng1, lat2, lng2) {
@@ -152,16 +233,30 @@ async function fetchTimeout(url, opts, ms) {
   }
 }
 
-/* ---------- Météo (facteur principal) ---------- */
-
-function facteurTemp(t) {
-  if (t <= 4 || t >= 26) return 0;
-  if (t < 10) return (t - 4) / 6;
-  if (t <= 20) return 1;
-  return (26 - t) / 6;
+function trapeze(x, p) {
+  if (x <= p[0] || x >= p[3]) return 0;
+  if (x < p[1]) return (x - p[0]) / (p[1] - p[0]);
+  if (x <= p[2]) return 1;
+  return (p[3] - x) / (p[3] - p[2]);
 }
 
-function indiceMeteo(d) {
+// Saison lissée entre le mois en cours et le mois voisin
+function facteurSaison(mois, date) {
+  const m = date.getMonth();
+  const jours = new Date(date.getFullYear(), m + 1, 0).getDate();
+  const pos = (date.getDate() - 0.5) / jours - 0.5;
+  const voisin = pos >= 0 ? (m + 1) % 12 : (m + 11) % 12;
+  return mois[m] * (1 - Math.abs(pos)) + mois[voisin] * Math.abs(pos);
+}
+
+function majSaisons() {
+  const d = new Date();
+  ESPECES.forEach(e => { e.saisonAuj = facteurSaison(e.mois, d); });
+}
+
+/* ---------- Météo et altitude ---------- */
+
+function resumerJours(d) {
   const n = d.time.length;
   const ok = x => x != null;
   // Pluie de J-14 à J-2 : les champignons sortent quelques jours après la pluie
@@ -172,21 +267,22 @@ function indiceMeteo(d) {
       tm.push((d.temperature_2m_max[i] + d.temperature_2m_min[i]) / 2);
     }
   }
-  const tmoy = tm.length ? tm.reduce((a, b) => a + b, 0) / tm.length : null;
   const mins = d.temperature_2m_min.slice(Math.max(0, n - 5)).filter(ok);
-  const tmin = mins.length ? Math.min(...mins) : null;
-  const fP = Math.min(1, pluie / PLUIE_OPTI);
-  const fT = tmoy == null ? 0.5 : facteurTemp(tmoy);
-  const fG = tmin != null && tmin < -1 ? 0.4 : 1;
   return {
-    pluie: Math.round(pluie),
-    tmoy: tmoy == null ? null : Math.round(tmoy * 10) / 10,
-    indice: fP * fT * fG
+    pluie,
+    tmoy: tm.length ? tm.reduce((a, b) => a + b, 0) / tm.length : null,
+    tmin: mins.length ? Math.min(...mins) : null
   };
 }
 
-// Météo d'un seul point (utilisée pour enregistrer une sortie)
-async function meteo(lat, lng, date) {
+function indiceGenerique(v) {
+  const fT = v.tmoy == null ? 0.5 : trapeze(v.tmoy, [4, 10, 20, 26]);
+  const fG = v.tmin != null && v.tmin < -1 ? 0.4 : 1;
+  return Math.min(1, v.pluie / 40) * fT * fG;
+}
+
+// Météo d'un point à une date (pour enregistrer une sortie)
+async function meteoPoint(lat, lng, date) {
   const fmt = d => d.toISOString().slice(0, 10);
   const la = lat.toFixed(2), lo = lng.toFixed(2);
   const fin = new Date(date);
@@ -200,7 +296,8 @@ async function meteo(lat, lng, date) {
     try {
       const j = await (await fetchTimeout(base + params, {}, 15000)).json();
       if (!j.daily || !j.daily.time) continue;
-      const v = indiceMeteo(j.daily);
+      const v = resumerJours(j.daily);
+      v.indice = indiceGenerique(v);
       cacheMeteo[cle] = { t: Date.now(), v };
       return v;
     } catch (e) {}
@@ -208,78 +305,194 @@ async function meteo(lat, lng, date) {
   return null;
 }
 
-// Météo sur une grille de points couvrant la zone affichée
-async function chargerMeteoGrille(zone) {
+function grillePoints(zone, rows, cols) {
   const S = zone.getSouth(), N = zone.getNorth(), W = zone.getWest(), E = zone.getEast();
   const lats = [], lngs = [];
-  for (let r = 0; r < GM_ROWS; r++) {
-    for (let c = 0; c < GM_COLS; c++) {
-      lats.push((S + (N - S) * r / (GM_ROWS - 1)).toFixed(4));
-      lngs.push((W + (E - W) * c / (GM_COLS - 1)).toFixed(4));
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      lats.push(S + (N - S) * r / (rows - 1));
+      lngs.push(W + (E - W) * c / (cols - 1));
     }
   }
+  return { S, N, W, E, rows, cols, lats, lngs };
+}
+
+async function chargerMeteoGrille(zone) {
+  const g = grillePoints(zone, GM_ROWS, GM_COLS);
   const fmt = d => d.toISOString().slice(0, 10);
   const fin = new Date();
   const debut = new Date(fin.getTime() - 14 * 86400000);
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lats.join(',')}&longitude=${lngs.join(',')}` +
+  const url = 'https://api.open-meteo.com/v1/forecast' +
+              `?latitude=${g.lats.map(x => x.toFixed(4)).join(',')}&longitude=${g.lngs.map(x => x.toFixed(4)).join(',')}` +
               `&start_date=${fmt(debut)}&end_date=${fmt(fin)}` +
               '&daily=precipitation_sum,temperature_2m_max,temperature_2m_min&timezone=auto';
-  const r = await fetchTimeout(url, {}, 20000);
-  const j = await r.json();
+  const j = await (await fetchTimeout(url, {}, 20000)).json();
   const liste = Array.isArray(j) ? j : [j];
-  const vals = liste.map(o => (o && o.daily && o.daily.time) ? indiceMeteo(o.daily) : null);
-  const ok = vals.filter(Boolean);
-  if (!ok.length) throw new Error(j && j.reason ? j.reason : 'météo indisponible');
-  const moy = ok.reduce((a, v) => a + v.indice, 0) / ok.length;
-  return { zone, S, N, W, E, rows: GM_ROWS, cols: GM_COLS, vals, moy, t: Date.now() };
+  const pts = liste.map(o => {
+    if (!o || !o.daily || !o.daily.time) return null;
+    const v = resumerJours(o.daily);
+    v.elev = typeof o.elevation === 'number' ? o.elevation : null;
+    return v;
+  });
+  const ok = pts.filter(Boolean);
+  if (!ok.length || pts.length !== g.rows * g.cols) throw new Error(j && j.reason ? j.reason : 'météo indisponible');
+  const moy = champ => {
+    const a = ok.map(p => p[champ]).filter(x => x != null);
+    return a.length ? a.reduce((s, x) => s + x, 0) / a.length : null;
+  };
+  const m = { pluie: moy('pluie'), tmoy: moy('tmoy'), tmin: moy('tmin'), elev: moy('elev') };
+  const val = (p, k, def) => (p && p[k] != null) ? p[k] : (m[k] != null ? m[k] : def);
+  g.pluie = Float32Array.from(pts.map(p => val(p, 'pluie', 0)));
+  g.tmoy = Float32Array.from(pts.map(p => val(p, 'tmoy', 12)));
+  g.tmin = Float32Array.from(pts.map(p => val(p, 'tmin', 5)));
+  g.elev = m.elev == null ? null : Float32Array.from(pts.map(p => val(p, 'elev', 0)));
+  const aP = Array.from(g.pluie), aT = Array.from(g.tmoy);
+  g.resume = {
+    pMin: Math.round(Math.min(...aP)), pMax: Math.round(Math.max(...aP)),
+    tMin: Math.min(...aT), tMax: Math.max(...aT)
+  };
+  return g;
 }
 
-function zoneMeteo(vue) {
+async function chargerAltitudes(zone) {
+  const g = grillePoints(zone, GE_ROWS, GE_COLS);
+  const n = g.lats.length;
+  const vals = new Float32Array(n);
+  const requetes = [];
+  for (let k = 0; k < n; k += 100) {
+    const la = g.lats.slice(k, k + 100).map(x => x.toFixed(4)).join(',');
+    const lo = g.lngs.slice(k, k + 100).map(x => x.toFixed(4)).join(',');
+    requetes.push(
+      fetchTimeout(`https://api.open-meteo.com/v1/elevation?latitude=${la}&longitude=${lo}`, {}, 15000)
+        .then(r => r.json())
+        .then(j => {
+          if (!j.elevation) throw new Error('altitude');
+          j.elevation.forEach((e, i) => { vals[k + i] = e; });
+        })
+    );
+  }
+  await Promise.all(requetes);
+  g.vals = vals;
+  return g;
+}
+
+function zoneEnv(vue) {
   const c = vue.getCenter();
   return vue.pad(0.3).extend(L.latLngBounds([c.lat - 0.03, c.lng - 0.045], [c.lat + 0.03, c.lng + 0.045]));
 }
 
-function assurerMeteo(vue) {
-  if (grilleMeteo && grilleMeteo.zone.contains(vue) && Date.now() - grilleMeteo.t < 2 * 3600000) return Promise.resolve();
-  if (chargementMeteo && chargementMeteo.zone.contains(vue)) return chargementMeteo.promise;
-  const zone = zoneMeteo(vue);
-  const promise = chargerMeteoGrille(zone)
-    .then(g => { grilleMeteo = g; meteoErreur = ''; })
-    .catch(e => { meteoErreur = e.message || 'erreur'; })
-    .finally(() => { if (chargementMeteo && chargementMeteo.promise === promise) chargementMeteo = null; });
-  chargementMeteo = { zone, promise };
+function assurerEnv(vue) {
+  if (env && env.zone.contains(vue) && Date.now() - env.t < 2 * 3600000) return Promise.resolve();
+  if (chargementEnv && chargementEnv.zone.contains(vue)) return chargementEnv.promise;
+  const zone = zoneEnv(vue);
+  const promise = Promise.all([chargerMeteoGrille(zone), chargerAltitudes(zone).catch(() => null)])
+    .then(([meteo, alt]) => { env = { zone, meteo, alt, t: Date.now() }; envErreur = ''; })
+    .catch(e => { envErreur = e.message || 'erreur'; })
+    .finally(() => { if (chargementEnv && chargementEnv.promise === promise) chargementEnv = null; });
+  chargementEnv = { zone, promise };
   return promise;
 }
 
-// Indice météo interpolé à un point (bilinéaire entre les points de la grille)
-function meteoEn(lat, lng) {
-  const g = grilleMeteo;
-  if (!g) return null;
+function bilin(g, lat, lng) {
   const fr = clamp((lat - g.S) / (g.N - g.S) * (g.rows - 1), 0, g.rows - 1);
   const fc = clamp((lng - g.W) / (g.E - g.W) * (g.cols - 1), 0, g.cols - 1);
   const r0 = Math.floor(fr), c0 = Math.floor(fc);
   const r1 = Math.min(r0 + 1, g.rows - 1), c1 = Math.min(c0 + 1, g.cols - 1);
   const a = fr - r0, b = fc - c0;
-  const v = (r, c) => { const x = g.vals[r * g.cols + c]; return x ? x.indice : g.moy; };
-  return v(r0, c0) * (1 - a) * (1 - b) + v(r0, c1) * (1 - a) * b + v(r1, c0) * a * (1 - b) + v(r1, c1) * a * b;
+  return [r0 * g.cols + c0, r0 * g.cols + c1, r1 * g.cols + c0, r1 * g.cols + c1,
+          (1 - a) * (1 - b), (1 - a) * b, a * (1 - b), a * b];
 }
 
-function resumeMeteo() {
-  const g = grilleMeteo;
-  if (!g) return null;
-  const ok = g.vals.filter(Boolean);
-  const moyenne = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
-  const tm = ok.map(v => v.tmoy).filter(x => x != null);
-  const ind = ok.map(v => v.indice);
-  return {
-    pluie: Math.round(moyenne(ok.map(v => v.pluie))),
-    tmoy: tm.length ? Math.round(moyenne(tm) * 10) / 10 : null,
-    min: Math.round(Math.min(...ind) * 100),
-    max: Math.round(Math.max(...ind) * 100)
-  };
+function interp(vals, w) {
+  return vals[w[0]] * w[4] + vals[w[1]] * w[5] + vals[w[2]] * w[6] + vals[w[3]] * w[7];
 }
 
-/* ---------- Forêts (OpenStreetMap via Overpass, en arrière-plan) ---------- */
+// Conditions locales : météo interpolée, température corrigée par l'altitude
+function envEn(lat, lng) {
+  if (!env) return null;
+  const g = env.meteo;
+  const w = bilin(g, lat, lng);
+  let t = interp(g.tmoy, w);
+  let tmin = interp(g.tmin, w);
+  const pluie = interp(g.pluie, w);
+  let alt = null;
+  if (env.alt) {
+    alt = interp(env.alt.vals, bilin(env.alt, lat, lng));
+    if (g.elev) {
+      const dz = alt - interp(g.elev, w);
+      t -= GRADIENT_T * dz;
+      tmin -= GRADIENT_T * dz;
+    }
+  }
+  return { t, tmin, pluie, alt };
+}
+
+/* ---------- Habitats (IGN BD Forêt, OpenStreetMap en secours) ---------- */
+
+function classerTexte(txt) {
+  if (/lande/.test(txt)) return 'lande';
+  if (/herbac/.test(txt)) return 'ouvert';
+  if (/peupl/.test(txt)) return 'peupleraie';
+  if (/mixte/.test(txt) || (/feuillu/.test(txt) && /conif/.test(txt))) return 'mixte';
+  if (/ch[eê]ne/.test(txt)) return 'chene';
+  if (/h[eê]tre/.test(txt)) return 'hetre';
+  if (/ch[aâ]taign/.test(txt)) return 'chataignier';
+  if (/\bpins?\b/.test(txt)) return 'pin';
+  if (/sapin|[eé]pic[eé]a|douglas|m[eé]l[eè]ze/.test(txt)) return 'sapin';
+  if (/conif/.test(txt)) return 'coniferes';
+  if (/feuillu|robinier|bouleau|fr[eê]ne|charme|aulne/.test(txt)) return 'feuillus';
+  return 'foret';
+}
+
+function ajouterPoly(liste, rings, code) {
+  rings = rings.filter(r => r.length > 1);
+  if (!rings.length) return;
+  const b = [90, 180, -90, -180];
+  for (const r of rings) for (const p of r) {
+    if (p[0] < b[0]) b[0] = p[0];
+    if (p[1] < b[1]) b[1] = p[1];
+    if (p[0] > b[2]) b[2] = p[0];
+    if (p[1] > b[3]) b[3] = p[1];
+  }
+  liste.push({ rings, b, h: H[code] });
+}
+
+async function chargerIGN(zone) {
+  const S = zone.getSouth(), N = zone.getNorth(), W = zone.getWest(), E = zone.getEast();
+  const base = 'https://data.geopf.fr/wfs/ows?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature' +
+               '&TYPENAMES=LANDCOVER.FORESTINVENTORY.V2:formation_vegetale' +
+               '&OUTPUTFORMAT=application/json&SRSNAME=EPSG:4326' +
+               `&BBOX=${S.toFixed(5)},${W.toFixed(5)},${N.toFixed(5)},${E.toFixed(5)},urn:ogc:def:crs:EPSG::4326`;
+  const liste = [];
+  let lonlat = null;
+  for (let page = 0; page < 6; page++) {
+    let feats;
+    try {
+      const r = await fetchTimeout(base + `&COUNT=1000&STARTINDEX=${page * 1000}`, {}, 25000);
+      if (!r.ok) throw new Error('IGN ' + r.status);
+      feats = (await r.json()).features || [];
+    } catch (e) {
+      if (page === 0) throw e;
+      break;
+    }
+    for (const f of feats) {
+      const g = f.geometry;
+      if (!g || (g.type !== 'Polygon' && g.type !== 'MultiPolygon')) continue;
+      const groupes = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
+      if (!groupes.length || !groupes[0].length || !groupes[0][0].length) continue;
+      if (lonlat === null) {
+        const c0 = groupes[0][0][0];
+        lonlat = c0[0] >= W - 1 && c0[0] <= E + 1 && c0[1] >= S - 1 && c0[1] <= N + 1;
+      }
+      const rings = [];
+      for (const p of groupes) for (const ring of p) rings.push(ring.map(c => lonlat ? [c[1], c[0]] : [c[0], c[1]]));
+      const txt = Object.values(f.properties || {}).filter(x => typeof x === 'string').join(' ').toLowerCase();
+      ajouterPoly(liste, rings, classerTexte(txt));
+    }
+    if (feats.length < 1000) break;
+  }
+  return liste;
+}
 
 async function overpass(q) {
   let derniere = 'serveur injoignable';
@@ -303,12 +516,7 @@ async function overpass(q) {
   throw new Error(derniere);
 }
 
-function zoneAutour(vue) {
-  const c = vue.getCenter();
-  return vue.pad(0.25).extend(L.latLngBounds([c.lat - 0.04, c.lng - 0.06], [c.lat + 0.04, c.lng + 0.06]));
-}
-
-async function chargerForets(zone) {
+async function chargerOSM(zone) {
   const bb = [zone.getSouth(), zone.getWest(), zone.getNorth(), zone.getEast()].map(x => x.toFixed(5)).join(',');
   const q = `[out:json][timeout:20];(way["landuse"="forest"](${bb});way["natural"="wood"](${bb});` +
             `relation["landuse"="forest"](${bb});relation["natural"="wood"](${bb}););out geom;`;
@@ -317,58 +525,75 @@ async function chargerForets(zone) {
   for (const el of data.elements || []) {
     let rings = [];
     if (el.type === 'way' && el.geometry) {
-      const g = el.geometry.filter(Boolean);
-      if (g.length > 2 && (g[0].lat !== g[g.length - 1].lat || g[0].lon !== g[g.length - 1].lon)) g.push(g[0]);
+      const g = el.geometry.filter(Boolean).map(p => [p.lat, p.lon]);
+      if (g.length > 2 && (g[0][0] !== g[g.length - 1][0] || g[0][1] !== g[g.length - 1][1])) g.push(g[0]);
       rings = [g];
     } else if (el.type === 'relation' && el.members) {
-      rings = el.members.filter(m => m.type === 'way' && m.geometry).map(m => m.geometry.filter(Boolean));
-    }
-    rings = rings.filter(r => r.length > 1);
-    if (!rings.length) continue;
-    const b = [90, 180, -90, -180];
-    for (const r of rings) for (const p of r) {
-      if (p.lat < b[0]) b[0] = p.lat;
-      if (p.lon < b[1]) b[1] = p.lon;
-      if (p.lat > b[2]) b[2] = p.lat;
-      if (p.lon > b[3]) b[3] = p.lon;
+      rings = el.members.filter(m => m.type === 'way' && m.geometry)
+        .map(m => m.geometry.filter(Boolean).map(p => [p.lat, p.lon]));
     }
     const lt = el.tags && el.tags.leaf_type;
-    const f = lt === 'needleleaved' ? 0.9 : 1;
-    liste.push({ rings, b, f });
+    const code = lt === 'broadleaved' ? 'feuillus' : lt === 'needleleaved' ? 'coniferes' : lt === 'mixed' ? 'mixte' : 'foret';
+    ajouterPoly(liste, rings, code);
   }
   return liste;
 }
 
-function assurerForets(vue) {
-  if (foretsZone && foretsZone.contains(vue)) return Promise.resolve();
-  if (chargementForets && chargementForets.zone.contains(vue)) return chargementForets.promise;
-  const zone = zoneAutour(vue);
-  const promise = chargerForets(zone)
-    .then(liste => { polys = liste; foretsZone = zone; foretErreur = ''; })
-    .catch(e => { foretErreur = e.message || 'erreur'; })
-    .finally(() => { if (chargementForets && chargementForets.promise === promise) chargementForets = null; });
-  chargementForets = { zone, promise };
+async function chargerHabitat(zone) {
+  try {
+    const l = await chargerIGN(zone);
+    if (l.length) return { liste: l, source: 'IGN BD Forêt' };
+  } catch (e) {}
+  return { liste: await chargerOSM(zone), source: 'OpenStreetMap' };
+}
+
+function zoneHab(vue) {
+  const c = vue.getCenter();
+  return vue.pad(0.15).extend(L.latLngBounds([c.lat - 0.025, c.lng - 0.035], [c.lat + 0.025, c.lng + 0.035]));
+}
+
+function assurerHab(vue) {
+  if (habZone && habZone.contains(vue)) return Promise.resolve();
+  if (chargementHab && chargementHab.zone.contains(vue)) return chargementHab.promise;
+  const zone = zoneHab(vue);
+  const promise = chargerHabitat(zone)
+    .then(r => { polys = r.liste; habZone = zone; habSource = r.source; habErreur = ''; })
+    .catch(e => { habErreur = e.message || 'erreur'; })
+    .finally(() => { if (chargementHab && chargementHab.promise === promise) chargementHab = null; });
+  chargementHab = { zone, promise };
   return promise;
 }
 
-function foretEn(lat, lng) {
-  let f = 0;
+function habitatEn(lat, lng) {
+  if (!habZone || !habZone.contains([lat, lng])) return INCONNU;
+  let code = H.ouvert;
   for (const poly of polys) {
     if (lat < poly.b[0] || lat > poly.b[2] || lng < poly.b[1] || lng > poly.b[3]) continue;
     let dedans = false;
     for (const ring of poly.rings) {
-      for (let i = 0; i < ring.length - 1; i++) {
-        const a = ring[i], b = ring[i + 1];
-        if ((a.lat > lat) !== (b.lat > lat) &&
-            lng < a.lon + (lat - a.lat) * (b.lon - a.lon) / (b.lat - a.lat)) dedans = !dedans;
+      for (let k = 0; k < ring.length - 1; k++) {
+        const a = ring[k], b = ring[k + 1];
+        if ((a[0] > lat) !== (b[0] > lat) &&
+            lng < a[1] + (lat - a[0]) * (b[1] - a[1]) / (b[0] - a[0])) dedans = !dedans;
       }
     }
-    if (dedans && poly.f > f) f = poly.f;
+    if (dedans && (code === H.ouvert || code === H.foret)) code = poly.h;
   }
-  return f;
+  return code;
 }
 
-/* ---------- Sorties (ajustement secondaire) ---------- */
+/* ---------- Calcul par espèce ---------- */
+
+// Météo et saison d'abord, habitat ensuite
+function scoreEspece(e, hab, en) {
+  const h = hab === INCONNU ? 0.5 : (e.hab[HABITATS[hab]] || 0);
+  if (!h || !e.saisonAuj) return 0;
+  const fT = trapeze(en.t, e.temp);
+  if (!fT) return 0;
+  const fP = Math.min(1, en.pluie / e.pluie);
+  const fG = en.tmin < -2 ? e.gel : 1;
+  return P_PLAFOND * e.saisonAuj * h * fT * fP * fG;
+}
 
 function poidsSortie(s, now) {
   const age = Math.max(0, (now - new Date(s.date).getTime()) / 86400000);
@@ -376,36 +601,45 @@ function poidsSortie(s, now) {
   if (!s.found) {
     // Une sortie sans résultat par temps défavorable compte peu
     if (s.indice != null) fiab = s.indice;
-    else if (s.pluie != null) fiab = Math.min(1, s.pluie / PLUIE_OPTI);
+    else if (s.pluie != null) fiab = Math.min(1, s.pluie / 40);
     else fiab = 0.5;
     fiab = Math.max(0.1, fiab);
   }
   return Math.pow(0.5, age / DEMI_VIE) * fiab;
 }
 
-// Retourne un multiplicateur entre 1 - AJUST_MAX et 1 + AJUST_MAX
 function ajustement(sw, swy) {
   if (sw <= 0) return 1;
   return 1 + AJUST_MAX * (2 * swy - sw) / (sw + 1);
 }
 
-function probaPoint(lat, lng) {
-  const m = meteoEn(lat, lng);
-  const charge = !!(foretsZone && foretsZone.contains([lat, lng]));
-  const f = charge ? foretEn(lat, lng) : 0;
-  const hab = !charge ? HAB_INCONNU : (f > 0 ? f : HAB_HORS);
+function sortiesPour(id) {
+  return id === 'toutes' ? sorties : sorties.filter(s => !s.espece || s.espece === id);
+}
+
+function especesEn(lat, lng) {
+  majSaisons();
+  const en = envEn(lat, lng) || DEFAUT_ENV;
+  const hab = habitatEn(lat, lng);
   const now = Date.now();
-  let sw = 0, swy = 0, n = 0;
-  for (const s of sorties) {
-    const d = distance(lat, lng, s.lat, s.lng);
-    if (d > RAYON) continue;
-    const w = poidsSortie(s, now) * (1 - d / RAYON);
-    sw += w;
-    swy += w * (s.found ? 1 : 0);
-    n++;
-  }
-  const ajust = ajustement(sw, swy);
-  return { p: clamp((m == null ? 0.5 : m) * hab * ajust, 0, 1), m, f, charge, n, ajust };
+  const proches = sorties.map(s => ({ s, d: distance(lat, lng, s.lat, s.lng) })).filter(x => x.d <= RAYON);
+  const ajustPour = id => {
+    let sw = 0, swy = 0;
+    for (const { s, d } of proches) {
+      if (id !== 'toutes' && s.espece && s.espece !== id) continue;
+      const w = poidsSortie(s, now) * (1 - d / RAYON);
+      sw += w;
+      swy += w * (s.found ? 1 : 0);
+    }
+    return ajustement(sw, swy);
+  };
+  let maxBase = 0;
+  const liste = ESPECES.map(e => {
+    const base = scoreEspece(e, hab, en);
+    if (base > maxBase) maxBase = base;
+    return { e, p: clamp(base * ajustPour(e.id), 0, 1) };
+  }).sort((a, b) => b.p - a.p);
+  return { en, hab, liste, pToutes: clamp(maxBase * ajustPour('toutes'), 0, 1), nProches: proches.length };
 }
 
 /* ---------- Heatmap ---------- */
@@ -423,6 +657,7 @@ function rampe(t) {
 
 function dessinerHeatmap() {
   chaleur.clearLayers();
+  majSaisons();
   const v = map.getBounds();
   const S = v.getSouth(), N = v.getNorth(), W = v.getWest(), E = v.getEast();
   const cosc = Math.cos(((S + N) / 2) * Math.PI / 180);
@@ -432,18 +667,18 @@ function dessinerHeatmap() {
   const rows = Math.ceil((N - S) / dLat);
   const nb = rows * cols;
 
-  // Masque forêt par balayage ligne par ligne
-  const masque = new Float32Array(nb);
-  if (foretsZone) {
+  // Habitats par balayage ligne par ligne
+  const masque = new Uint8Array(nb);
+  if (habZone) {
     for (let r = 0; r < rows; r++) {
       const lat = S + (r + 0.5) * dLat;
       for (const poly of polys) {
         if (lat < poly.b[0] || lat > poly.b[2] || poly.b[3] < W || poly.b[1] > E) continue;
         const xs = [];
         for (const ring of poly.rings) {
-          for (let i = 0; i < ring.length - 1; i++) {
-            const a = ring[i], b = ring[i + 1];
-            if ((a.lat > lat) !== (b.lat > lat)) xs.push(a.lon + (lat - a.lat) * (b.lon - a.lon) / (b.lat - a.lat));
+          for (let k = 0; k < ring.length - 1; k++) {
+            const a = ring[k], b = ring[k + 1];
+            if ((a[0] > lat) !== (b[0] > lat)) xs.push(a[1] + (lat - a[0]) * (b[1] - a[1]) / (b[0] - a[0]));
           }
         }
         if (xs.length < 2) continue;
@@ -452,18 +687,22 @@ function dessinerHeatmap() {
           const c0 = Math.max(0, Math.ceil((xs[k] - W) / dLng - 0.5));
           const c1 = Math.min(cols - 1, Math.floor((xs[k + 1] - W) / dLng - 0.5));
           for (let c = c0; c <= c1; c++) {
-            if (masque[r * cols + c] < poly.f) masque[r * cols + c] = poly.f;
+            const i = r * cols + c;
+            if (masque[i] === H.ouvert || masque[i] === H.foret) masque[i] = poly.h;
           }
         }
       }
     }
   }
+  const hz = habZone
+    ? { S: habZone.getSouth(), N: habZone.getNorth(), W: habZone.getWest(), E: habZone.getEast() }
+    : null;
 
-  // Influence des sorties
+  // Ajustement par les sorties
   const sw = new Float32Array(nb), swy = new Float32Array(nb);
   const mLat = 111320, mLng = 111320 * cosc, now = Date.now();
   const nr = Math.ceil(RAYON / (dLat * mLat)), nc = Math.ceil(RAYON / (dLng * mLng));
-  for (const s of sorties) {
+  for (const s of sortiesPour(especeSel)) {
     const w0 = poidsSortie(s, now);
     if (w0 < 0.01) continue;
     const r0 = Math.floor((s.lat - S) / dLat), c0 = Math.floor((s.lng - W) / dLng);
@@ -480,10 +719,8 @@ function dessinerHeatmap() {
     }
   }
 
-  // Image : météo x habitat x ajustement des sorties ; jaune = faible, rouge = élevé
-  const fz = foretsZone
-    ? { S: foretsZone.getSouth(), N: foretsZone.getNorth(), W: foretsZone.getWest(), E: foretsZone.getEast() }
-    : null;
+  // Image : jaune = faible, rouge = élevé
+  const esp = ESPECES.find(e => e.id === especeSel);
   const cv = document.createElement('canvas');
   cv.width = cols;
   cv.height = rows;
@@ -494,17 +731,26 @@ function dessinerHeatmap() {
     for (let c = 0; c < cols; c++) {
       const lng = W + (c + 0.5) * dLng;
       const i = r * cols + c;
-      const m0 = meteoEn(lat, lng);
-      const m = m0 == null ? 0.5 : m0;
-      const dansZone = fz && lat >= fz.S && lat <= fz.N && lng >= fz.W && lng <= fz.E;
-      const hab = !dansZone ? HAB_INCONNU : (masque[i] > 0 ? masque[i] : HAB_HORS);
-      const p = clamp(m * hab * ajustement(sw[i], swy[i]), 0, 1);
-      const [R, G, B] = rampe(p);
+      const dansZone = hz && lat >= hz.S && lat <= hz.N && lng >= hz.W && lng <= hz.E;
+      const hab = dansZone ? masque[i] : INCONNU;
+      const en = envEn(lat, lng) || DEFAUT_ENV;
+      let s = 0;
+      if (esp) {
+        s = scoreEspece(esp, hab, en);
+      } else {
+        for (const e of ESPECES) {
+          const x = scoreEspece(e, hab, en);
+          if (x > s) s = x;
+        }
+      }
+      const p = clamp(s * ajustement(sw[i], swy[i]), 0, 1);
+      const t = clamp(p / P_PLAFOND, 0, 1);
+      const [R, G, B] = rampe(t);
       const o = ((rows - 1 - r) * cols + c) * 4;
       img.data[o] = R;
       img.data[o + 1] = G;
       img.data[o + 2] = B;
-      img.data[o + 3] = Math.round(90 + 150 * p);
+      img.data[o + 3] = Math.round(60 + 175 * t);
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -516,27 +762,28 @@ function dessinerHeatmap() {
 }
 
 function texteInfo() {
-  const lignes = [];
-  const r = resumeMeteo();
-  if (r) {
-    const ind = r.min === r.max ? r.min : r.min + ' à ' + r.max;
-    lignes.push(`Météo : ${r.pluie} mm sur 2 sem., ${r.tmoy ?? '?'} °C, indice ${ind} %`);
-  } else if (chargementMeteo) {
-    lignes.push('Météo : chargement…');
+  const l = [];
+  if (env) {
+    const g = env.meteo.resume;
+    const pl = g.pMin === g.pMax ? g.pMin : `${g.pMin} à ${g.pMax}`;
+    const tp = Math.abs(g.tMax - g.tMin) < 0.1 ? f1(g.tMin) : `${f1(g.tMin)} à ${f1(g.tMax)}`;
+    l.push(`Pluie 2 sem. : ${pl} mm, temp. moy. : ${tp} °C`);
+  } else if (chargementEnv) {
+    l.push('Météo : chargement…');
   } else {
-    lignes.push(`Météo indisponible${meteoErreur ? ' (' + meteoErreur + ')' : ''}, valeur moyenne utilisée`);
+    l.push(`Météo indisponible${envErreur ? ' (' + envErreur + ')' : ''}`);
   }
-  if (chargementForets) lignes.push('Forêts : chargement en cours…');
-  else if (foretsZone) lignes.push(`Forêts : ${polys.length} zone(s)`);
-  else lignes.push(`Forêts non chargées${foretErreur ? ' (' + foretErreur + ')' : ''}`);
-  lignes.push(sorties.length ? `${sorties.length} sortie(s) enregistrée(s)` : 'Aucune sortie enregistrée');
-  return lignes.join('<br>');
+  if (chargementHab) l.push('Habitats : chargement…');
+  else if (habZone) l.push(`Habitats : ${polys.length} zones (${habSource})`);
+  else l.push(`Habitats non chargés${habErreur ? ' (' + habErreur + ')' : ''}`);
+  l.push(sorties.length ? `${sorties.length} sortie(s) enregistrée(s)` : 'Aucune sortie enregistrée');
+  return l.join('<br>');
 }
 
 async function actualiser(force) {
   if (force) {
-    grilleMeteo = null; chargementMeteo = null; meteoErreur = '';
-    foretsZone = null; chargementForets = null; foretErreur = ''; polys = [];
+    env = null; chargementEnv = null; envErreur = '';
+    habZone = null; chargementHab = null; habErreur = ''; habSource = ''; polys = [];
     cacheMeteo = {};
   }
   if (map.getZoom() < ZOOM_MIN) {
@@ -545,20 +792,29 @@ async function actualiser(force) {
     return;
   }
   const vue = map.getBounds();
-  const pm = assurerMeteo(vue);
-  const pf = assurerForets(vue);
+  const pe = assurerEnv(vue);
+  const ph = assurerHab(vue);
   info(texteInfo());
-  // Les forêts affinent la carte quand elles arrivent, sans bloquer l'affichage
-  pf.then(() => {
-    if (map.getZoom() >= ZOOM_MIN) { dessinerHeatmap(); info(texteInfo()); }
+  ph.then(() => {
+    if (map.getZoom() >= ZOOM_MIN && (env || !chargementEnv)) { dessinerHeatmap(); info(texteInfo()); }
   });
-  await pm;
+  await pe;
   if (map.getZoom() < ZOOM_MIN) return;
   dessinerHeatmap();
   info(texteInfo());
 }
 
 /* ---------- Interface ---------- */
+
+function changerEspece() {
+  especeSel = sel.value;
+  localStorage.setItem(KEY_ESP, especeSel);
+  majLegende();
+  if (map.getZoom() >= ZOOM_MIN) {
+    dessinerHeatmap();
+    info(texteInfo());
+  }
+}
 
 function render() {
   couche.clearLayers();
@@ -580,9 +836,11 @@ function render() {
 function popupHtml(s) {
   const d = new Date(s.date).toLocaleDateString('fr-FR');
   let h = `<b>${d}</b><br>${s.found ? 'Trouvé' : 'Rien trouvé'}`;
+  const e = s.espece ? ESPECES.find(x => x.id === s.espece) : null;
+  if (e) h += `<br>${e.nom}`;
   if (s.qty) h += `<br>${esc(s.qty)}`;
   if (s.note) h += `<br><i>${esc(s.note)}</i>`;
-  if (s.pluie != null) h += `<br>Pluie : ${s.pluie} mm`;
+  if (s.pluie != null) h += `<br>Pluie : ${Math.round(s.pluie)} mm`;
   if (s.indice != null) h += `<br>Indice météo : ${Math.round(s.indice * 100)} %`;
   h += `<br><button class="sec" onclick="supprimer(${s.id})">Supprimer</button>`;
   return h;
@@ -601,18 +859,40 @@ function closePanel() {
   if (tempMarker) { map.removeLayer(tempMarker); tempMarker = null; }
 }
 
+function menu() {
+  openPanel(`
+    <h3>Menu</h3>
+    <button onclick="closePanel(); actualiser(true)">Actualiser les données</button>
+    <button onclick="exporter()">Exporter</button>
+    <label class="btn">Importer<input type="file" accept="application/json" onchange="importer(event)" style="display:none"></label>
+    <p class="muted">Version ${VERSION}. Météo et altitude : Open-Meteo. Habitats : IGN BD Forêt, ou OpenStreetMap en secours.</p>
+    <button class="sec" onclick="closePanel()">Fermer</button>
+  `);
+}
+
 function showSpot(lat, lng) {
-  const r = probaPoint(lat, lng);
+  const r = especesEn(lat, lng);
   if (tempMarker) map.removeLayer(tempMarker);
   tempMarker = L.marker([lat, lng]).addTo(map);
-  const habitat = !r.charge ? 'non chargé' : (r.f > 0 ? 'forêt' : 'hors forêt');
-  const met = r.m == null ? 'indisponible' : Math.round(r.m * 100) + ' %';
-  const effet = Math.round((r.ajust - 1) * 100);
-  const txtSorties = r.n ? `${r.n} (effet ${effet >= 0 ? '+' : ''}${effet} %)` : 'aucune';
+  const esp = ESPECES.find(e => e.id === especeSel);
+  const titre = esp ? esp.nom : 'Toutes espèces';
+  const selP = esp ? r.liste.find(x => x.e.id === esp.id).p : r.pToutes;
+  const hab = r.hab === INCONNU ? 'non chargé' : NOMS_HAB[HABITATS[r.hab]];
+  let envTxt = `Habitat : ${hab}`;
+  if (r.en.alt != null) envTxt += `<br>Altitude : ${Math.round(r.en.alt)} m`;
+  envTxt += `<br>Pluie (2 sem.) : ${Math.round(r.en.pluie)} mm<br>Température moyenne (10 j) : ${f1(r.en.t)} °C`;
+  envTxt += `<br>Tes sorties à moins de ${RAYON} m : ${r.nProches}`;
+  const visibles = r.liste.filter(x => x.p >= 0.05).slice(0, 6);
+  const espHtml = visibles.length
+    ? visibles.map(x => `<div class="esp"><b>${x.e.nom}</b> <i>${x.e.latin}</i> : ${Math.round(x.p * 100)} %` +
+        (x.e.conf ? `<br><span class="conf">Confusions possibles : ${x.e.conf}</span>` : '') + '</div>').join('')
+    : '<p class="muted">Aucune espèce favorisée par les conditions actuelles à cet endroit.</p>';
   openPanel(`
-    <h3>Probabilité estimée : ${Math.round(r.p * 100)} %</h3>
-    <p class="muted">Indice météo local : ${met}<br>Habitat : ${habitat}<br>Tes sorties à moins de ${RAYON} m : ${txtSorties}</p>
-    <p class="muted">Estimation indicative, pas une garantie. Ne jamais utiliser cette carte pour identifier une espèce.</p>
+    <h3>${titre} : ${Math.round(selP * 100)} %</h3>
+    <p class="muted">${envTxt}</p>
+    <b>Espèces possibles ici</b>
+    ${espHtml}
+    <p class="alerte">L'amanite phalloïde, mortelle, pousse dans les mêmes forêts de l'été à la fin de l'automne. Cette carte n'identifie aucun champignon : fais contrôler toute récolte par un pharmacien ou une société mycologique.</p>
     <button onclick="openForm(${lat}, ${lng})">Noter une sortie ici</button>
     <button class="sec" onclick="closePanel()">Fermer</button>
   `);
@@ -620,11 +900,15 @@ function showSpot(lat, lng) {
 
 function openForm(lat, lng) {
   const maintenant = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  const opts = ESPECES.map(e => `<option value="${e.id}"${e.id === especeSel ? ' selected' : ''}>${e.nom}</option>`).join('');
   openPanel(`
     <h3>Nouvelle sortie</h3>
     <label>Date et heure<input id="f-date" type="datetime-local" value="${maintenant}"></label>
     <label>Résultat
       <select id="f-found"><option value="1">J'ai trouvé</option><option value="0">Rien trouvé</option></select>
+    </label>
+    <label>Espèce trouvée ou cherchée (facultatif)
+      <select id="f-esp"><option value="">Non précisée</option>${opts}</select>
     </label>
     <label>Quantité (facultatif)<input id="f-qty" placeholder="ex. 1 kg, 5 cèpes"></label>
     <label>Note (facultatif)<textarea id="f-note" rows="2"></textarea></label>
@@ -636,16 +920,17 @@ function openForm(lat, lng) {
 async function saveSortie(lat, lng) {
   const dateVal = document.getElementById('f-date').value;
   const found = document.getElementById('f-found').value === '1';
+  const espece = document.getElementById('f-esp').value;
   const qty = document.getElementById('f-qty').value.trim();
   const note = document.getElementById('f-note').value.trim();
   const date = dateVal ? new Date(dateVal) : new Date();
-  const mt = await meteo(lat, lng, date);
+  const mt = await meteoPoint(lat, lng, date);
   sorties.push({
     id: Date.now(),
     lat, lng,
     date: date.toISOString(),
-    found, qty, note,
-    pluie: mt ? mt.pluie : null,
+    found, espece, qty, note,
+    pluie: mt ? Math.round(mt.pluie) : null,
     indice: mt ? Math.round(mt.indice * 100) / 100 : null
   });
   save(); render(); closePanel();
@@ -676,7 +961,7 @@ function importer(e) {
     try {
       const data = JSON.parse(r.result);
       sorties = sorties.concat(data.filter(d => !sorties.some(s => s.id === d.id)));
-      save(); render();
+      save(); render(); closePanel();
       alert('Import terminé');
     } catch (err) {
       alert('Fichier invalide');
@@ -691,6 +976,7 @@ map.on('moveend', () => {
   minuterie = setTimeout(() => actualiser(false), 600);
 });
 
+majLegende();
 render();
 if (sorties.length) {
   const s = sorties[sorties.length - 1];
